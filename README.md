@@ -65,5 +65,5 @@ Documented deliberately, since knowing the edges of a system matters as much as 
 
 [#author](#author)
 
-**Pablo Jorda** — Software Engineering Student (Computing and AI)
+**Pablo Jorda** — Computer Engineering Student (Computing and AI)
 GitHub: [@pablojordab](https://github.com/pablojordab)
