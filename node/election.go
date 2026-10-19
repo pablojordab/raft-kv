@@ -54,12 +54,25 @@ func (n *Node) resetElectionTimerLocked() {
 	n.electionResetEvent = time.Now()
 }
 
-// RunElectionTimer is the goroutine that watches for this node's election
-// timeout. It's started once per term (see becomeCandidateLocked below,
-// which starts a fresh one for the new term whenever a node times out) and
-// exits on its own once that term is no longer current for this node —
-// either because this node became a candidate for a NEWER term, or
-// because it became (or heard from) a Leader.
+// RunElectionTimer is the single, long-lived goroutine that watches for
+// this node's election timeout, for as long as the node lives — it's
+// meant to be started exactly ONCE per process (see cmd/main.go, task 9),
+// not restarted per term.
+//
+// An earlier version of this method exited and relied on becomeCandidateLocked
+// to spawn a replacement for the new term. That had a real bug, caught
+// only by running a 3-process cluster end-to-end (task 9's verification):
+// a Follower's term also advances when it simply GRANTS a vote to a
+// candidate (vote.go's HandleRequestVote) or hears a valid heartbeat from
+// a leader (task 13) — neither of those paths spawns a new timer. A node
+// that only ever advanced its term that way, and never itself became a
+// Candidate, was left with NO election timer running at all: it would sit
+// as a Follower forever, even after the leader it last heard from had been
+// dead for a long time, because nothing was left watching the clock. This
+// version fixes that by never exiting except on shutdown: whenever it
+// notices the term moved on for ANY reason, it simply adopts a fresh
+// randomized timeout for the new term and keeps polling, so exactly one
+// timer is always watching, regardless of how a node's term got updated.
 //
 // This is deliberately NOT built on time.Timer.Reset. Reset has a
 // well-documented race: if a Timer has already fired and its value hasn't
@@ -69,19 +82,18 @@ func (n *Node) resetElectionTimerLocked() {
 // cases that are easy to get subtly wrong under concurrent access. Instead,
 // this follows the pattern used by several reference Raft implementations
 // (e.g. Eli Bendersky's raft toy implementation, and the approach
-// recommended in MIT 6.824's "Students' Guide to Raft"): a single
-// long-lived goroutine wakes up periodically, and compares time.Since(the
-// last reset event) against a timeout chosen once when the goroutine
-// started. Resetting the timer is then just writing a timestamp under the
-// lock — no channels, no race.
+// recommended in MIT 6.824's "Students' Guide to Raft"): a long-lived
+// goroutine wakes up periodically, and compares time.Since(the last reset
+// event) against a timeout chosen when it last noticed the term change.
+// Resetting the timer is then just writing a timestamp under the lock —
+// no channels, no race.
 func (n *Node) RunElectionTimer(ctx context.Context) {
-	timeout := randomElectionTimeout()
-
 	n.mu.Lock()
-	termStarted := n.persistent.CurrentTerm
+	timeout := randomElectionTimeout()
+	termWatched := n.persistent.CurrentTerm
 	n.mu.Unlock()
 
-	log.Printf("[node %d] election timer started for term %d (timeout %v)", n.id, termStarted, timeout)
+	log.Printf("[node %d] election timer started for term %d (timeout %v)", n.id, termWatched, timeout)
 
 	ticker := time.NewTicker(electionTimerPollInterval)
 	defer ticker.Stop()
@@ -95,30 +107,39 @@ func (n *Node) RunElectionTimer(ctx context.Context) {
 
 		n.mu.Lock()
 
-		// This goroutine was started for termStarted specifically. If
-		// the node's term has since moved on — e.g. because this very
-		// timeout already fired once and spawned a newer election
-		// timer for the next term — this instance's job is done. It
-		// exits rather than firing a second, stale election.
-		if n.persistent.CurrentTerm != termStarted {
+		// The term has moved on since we last picked a timeout — for
+		// ANY reason: this node started a new election itself, granted
+		// a vote to someone else, heard from a new leader, or stepped
+		// down after losing an election. Whatever the cause, the
+		// timeout we were tracking belongs to a stale term. Adopt a
+		// fresh one for the new term and keep polling, rather than
+		// exiting — this IS the only timer this node will ever get, so
+		// nothing else is going to restart it.
+		if n.persistent.CurrentTerm != termWatched {
+			timeout = randomElectionTimeout()
+			termWatched = n.persistent.CurrentTerm
+			log.Printf("[node %d] election timer resynced for term %d (timeout %v)", n.id, termWatched, timeout)
 			n.mu.Unlock()
-			return
+			continue
 		}
 
-		// Leaders don't run an election timer — they're the ones
-		// sending heartbeats, not waiting for them (task 8 will add
-		// the heartbeat loop). If this node won the election that
-		// started under termStarted, this timer has nothing left to
-		// do.
+		// Leaders don't start elections — they're the ones sending
+		// heartbeats, not waiting for them (heartbeat.go). Keep
+		// polling rather than exiting: if this node later steps down
+		// to Follower, this same goroutine needs to still be here to
+		// notice it.
 		if n.state == Leader {
 			n.mu.Unlock()
-			return
+			continue
 		}
 
 		if elapsed := time.Since(n.electionResetEvent); elapsed >= timeout {
 			n.becomeCandidateLocked(ctx)
-			n.mu.Unlock()
-			return
+			// becomeCandidateLocked just incremented CurrentTerm; adopt
+			// the new term's timeout immediately instead of waiting for
+			// the next tick to notice the mismatch above.
+			timeout = randomElectionTimeout()
+			termWatched = n.persistent.CurrentTerm
 		}
 
 		n.mu.Unlock()
@@ -130,12 +151,10 @@ func (n *Node) RunElectionTimer(ctx context.Context) {
 // increments its term, transitions to Candidate, and votes for itself.
 // Must be called with n.mu held.
 //
-// It then launches two goroutines for the new term: runElectionCampaign
-// (campaign.go), which actually requests votes from every peer and
-// promotes this node to Leader on a majority, and a fresh
-// RunElectionTimer, in case this election is inconclusive (a split vote)
-// and a retry with a new randomized timeout is needed, per the paper's
-// retry rule.
+// It launches runElectionCampaign (campaign.go) to actually request votes
+// from every peer and promote this node to Leader on a majority. It does
+// NOT spawn a new RunElectionTimer — see that method's doc comment for why
+// a single long-lived timer, not one per term, is what this project uses.
 func (n *Node) becomeCandidateLocked(ctx context.Context) {
 	n.persistent.CurrentTerm++
 	n.state = Candidate
@@ -146,5 +165,4 @@ func (n *Node) becomeCandidateLocked(ctx context.Context) {
 	log.Printf("[node %d] election timeout: becoming Candidate for term %d", n.id, term)
 
 	go n.runElectionCampaign(ctx, term)
-	go n.RunElectionTimer(ctx)
 }
