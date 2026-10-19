@@ -45,7 +45,7 @@ func (n *Node) runElectionCampaign(ctx context.Context, term int) {
 		// already its own majority — no RPCs needed.
 		n.mu.Lock()
 		if n.state == Candidate && n.persistent.CurrentTerm == term {
-			n.becomeLeaderLocked()
+			n.becomeLeaderLocked(ctx)
 		}
 		n.mu.Unlock()
 		return
@@ -105,7 +105,7 @@ func (n *Node) runElectionCampaign(ctx context.Context, term int) {
 			}
 
 			if votes >= votesNeeded {
-				n.becomeLeaderLocked()
+				n.becomeLeaderLocked(ctx)
 				n.mu.Unlock()
 				return
 			}
@@ -126,7 +126,7 @@ func (n *Node) runElectionCampaign(ctx context.Context, term int) {
 // a Candidate that wins a majority immediately becomes Leader and
 // (re-)initializes its leader-only volatile state. Must be called with
 // n.mu held.
-func (n *Node) becomeLeaderLocked() {
+func (n *Node) becomeLeaderLocked(ctx context.Context) {
 	n.state = Leader
 
 	// NextIndex/MatchIndex are leader-only bookkeeping for log
@@ -144,8 +144,13 @@ func (n *Node) becomeLeaderLocked() {
 	n.volatile.NextIndex = nextIndex
 	n.volatile.MatchIndex = matchIndex
 
-	log.Printf("[node %d] won election for term %d — becoming Leader", n.id, n.persistent.CurrentTerm)
+	term := n.persistent.CurrentTerm
+	log.Printf("[node %d] won election for term %d — becoming Leader", n.id, term)
 
-	// TODO (task 8): start sending heartbeat AppendEntries to every peer
-	// here, so followers don't time out and start a competing election.
+	// A Leader must immediately start asserting itself with heartbeats
+	// (see heartbeat.go) — every other node is still running its own
+	// election timer, and without heartbeats they'd time out and start
+	// competing elections within a couple hundred milliseconds even
+	// though this Leader is perfectly healthy.
+	go n.runHeartbeatLoop(ctx, term)
 }

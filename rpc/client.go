@@ -1,6 +1,10 @@
 package rpc
 
-import "net/rpc"
+import (
+	"net/rpc"
+
+	"github.com/pablojordab/raft-kv/node"
+)
 
 // NetRPCTransport implements node.Transport (see node/transport.go) using
 // Go's standard net/rpc package. It's the real, over-the-network
@@ -48,4 +52,38 @@ func (t *NetRPCTransport) SendRequestVote(peerAddr string, candidateTerm, candid
 		return 0, false, callErr
 	}
 	return reply.Term, reply.VoteGranted, nil
+}
+
+// SendAppendEntries dials peerAddr and issues an AppendEntries RPC,
+// satisfying node.Transport.
+//
+// As of task 8, RaftServer has no AppendEntries method yet (it's task
+// 13's responsibility — see server.go) — so every call made here will
+// fail with an "rpc: can't find method" error until then. That's fine for
+// now: a Leader already treats a failed heartbeat call as "this peer
+// didn't get the message this round" rather than something fatal (see
+// node/heartbeat.go), exactly like a failed RequestVote during an
+// election. Once task 13 adds the receiver, these same calls start
+// actually landing.
+func (t *NetRPCTransport) SendAppendEntries(peerAddr string, leaderTerm, leaderID, prevLogIndex, prevLogTerm int, entries []node.LogEntry, leaderCommit int) (term int, success bool, err error) {
+	client, dialErr := rpc.Dial("tcp", peerAddr)
+	if dialErr != nil {
+		return 0, false, dialErr
+	}
+	defer client.Close()
+
+	args := &AppendEntriesArgs{
+		Term:         leaderTerm,
+		LeaderID:     leaderID,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: leaderCommit,
+	}
+	var reply AppendEntriesReply
+
+	if callErr := client.Call("RaftServer.AppendEntries", args, &reply); callErr != nil {
+		return 0, false, callErr
+	}
+	return reply.Term, reply.Success, nil
 }
