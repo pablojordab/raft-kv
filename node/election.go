@@ -130,25 +130,21 @@ func (n *Node) RunElectionTimer(ctx context.Context) {
 // increments its term, transitions to Candidate, and votes for itself.
 // Must be called with n.mu held.
 //
-// NOTE: this does not yet send RequestVote RPCs to the other peers — that
-// campaign logic (contacting every peer, counting votes, becoming Leader
-// on a majority) is task 7, not this one. What's here is the minimal,
-// self-contained state change the Raft paper ties directly to the timeout
-// firing; task 7 will extend this method to actually run the election.
-//
-// It does spawn the NEXT election timer, for the new term — a candidate
-// still needs a timeout in case this election is inconclusive (a split
-// vote), per the paper's retry-with-new-randomized-timeout rule.
+// It then launches two goroutines for the new term: runElectionCampaign
+// (campaign.go), which actually requests votes from every peer and
+// promotes this node to Leader on a majority, and a fresh
+// RunElectionTimer, in case this election is inconclusive (a split vote)
+// and a retry with a new randomized timeout is needed, per the paper's
+// retry rule.
 func (n *Node) becomeCandidateLocked(ctx context.Context) {
 	n.persistent.CurrentTerm++
 	n.state = Candidate
 	n.persistent.VotedFor = n.id // a candidate always votes for itself
 	n.electionResetEvent = time.Now()
 
-	log.Printf("[node %d] election timeout: becoming Candidate for term %d", n.id, n.persistent.CurrentTerm)
+	term := n.persistent.CurrentTerm
+	log.Printf("[node %d] election timeout: becoming Candidate for term %d", n.id, term)
 
-	// TODO (task 7): request votes from every peer here, count the
-	// results, and transition to Leader on a majority.
-
+	go n.runElectionCampaign(ctx, term)
 	go n.RunElectionTimer(ctx)
 }

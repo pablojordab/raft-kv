@@ -27,6 +27,14 @@ type Node struct {
 	// this node's own id — a node never calls itself over RPC.
 	peers map[int]string
 
+	// transport is how this node calls peers over the network (currently
+	// just RequestVote, used by the election campaign in campaign.go).
+	// It's an interface — see transport.go — specifically so this
+	// package never has to import the rpc package's concrete client,
+	// and so tests can supply a fake that returns canned votes with no
+	// real network involved.
+	transport Transport
+
 	state NodeState
 
 	persistent PersistentState
@@ -50,12 +58,16 @@ type Node struct {
 // drive.
 //
 // id is this node's own identifier. peers maps every other node's id to
-// its RPC address, and must not contain an entry for id itself.
-func NewNode(id int, peers map[int]string) *Node {
+// its RPC address, and must not contain an entry for id itself. transport
+// is how this node will call those peers (e.g. an *rpc.NetRPCTransport in
+// production, or a fake in tests) — see transport.go for why it's taken as
+// an interface here instead of a concrete rpc-package type.
+func NewNode(id int, peers map[int]string, transport Transport) *Node {
 	return &Node{
-		id:    id,
-		peers: peers,
-		state: Follower,
+		id:        id,
+		peers:     peers,
+		transport: transport,
+		state:     Follower,
 		persistent: PersistentState{
 			CurrentTerm: 0,
 			VotedFor:    -1, // -1 means "no vote cast yet this term"
