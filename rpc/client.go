@@ -55,13 +55,12 @@ func (t *NetRPCTransport) SendRequestVote(peerAddr string, candidateTerm, candid
 }
 
 // SendAppendEntries dials peerAddr and issues an AppendEntries RPC,
-// satisfying node.Transport. RaftServer.AppendEntries (server.go) now
-// handles the heartbeat case these calls carry (Entries always nil, for
-// now); real log replication is still Block 2.
-func (t *NetRPCTransport) SendAppendEntries(peerAddr string, leaderTerm, leaderID, prevLogIndex, prevLogTerm int, entries []node.LogEntry, leaderCommit int) (term int, success bool, err error) {
+// satisfying node.Transport. Used for both heartbeats and log replication;
+// the receiving side is RaftServer.AppendEntries (server.go).
+func (t *NetRPCTransport) SendAppendEntries(peerAddr string, leaderTerm, leaderID, prevLogIndex, prevLogTerm int, entries []node.LogEntry, leaderCommit int) (node.AppendEntriesResult, error) {
 	client, dialErr := rpc.Dial("tcp", peerAddr)
 	if dialErr != nil {
-		return 0, false, dialErr
+		return node.AppendEntriesResult{}, dialErr
 	}
 	defer client.Close()
 
@@ -76,7 +75,12 @@ func (t *NetRPCTransport) SendAppendEntries(peerAddr string, leaderTerm, leaderI
 	var reply AppendEntriesReply
 
 	if callErr := client.Call("RaftServer.AppendEntries", args, &reply); callErr != nil {
-		return 0, false, callErr
+		return node.AppendEntriesResult{}, callErr
 	}
-	return reply.Term, reply.Success, nil
+	return node.AppendEntriesResult{
+		Term:          reply.Term,
+		Success:       reply.Success,
+		ConflictTerm:  reply.ConflictTerm,
+		ConflictIndex: reply.ConflictIndex,
+	}, nil
 }

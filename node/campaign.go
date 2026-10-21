@@ -93,9 +93,7 @@ func (n *Node) runElectionCampaign(ctx context.Context, term int) {
 				// A peer is ahead of us: we've lost, and this term is
 				// stale. Per the paper's §5.1 "Rules for Servers", step
 				// down to Follower and adopt the newer term.
-				n.persistent.CurrentTerm = res.peerTerm
-				n.state = Follower
-				n.persistent.VotedFor = -1
+				n.stepDownLocked(res.peerTerm)
 				n.mu.Unlock()
 				return
 			}

@@ -26,17 +26,40 @@ type Transport interface {
 	SendRequestVote(peerAddr string, candidateTerm, candidateID, lastLogIndex, lastLogTerm int) (term int, voteGranted bool, err error)
 
 	// SendAppendEntries dials peerAddr and issues an AppendEntries RPC,
-	// mirroring the Raft paper's Figure 2 AppendEntries parameters.
+	// mirroring the Raft paper's Figure 2 AppendEntries parameters. The
+	// same RPC carries both heartbeats (entries empty) and log
+	// replication (see heartbeat.go).
 	//
-	// As of task 8, a Leader only ever calls this with entries left nil
-	// (a heartbeat: "I'm still the Leader, don't start an election") and
-	// prevLogIndex/prevLogTerm left at 0 — real log replication (filling
-	// in entries, and caring whether success is true) is task 13.
+	// Returns the follower's reply (see AppendEntriesResult). A non-nil
+	// error means the RPC itself failed, which a Leader treats the same
+	// way a Candidate treats a failed RequestVote: that one peer just
+	// didn't get this round's message, and the next round retries.
+	SendAppendEntries(peerAddr string, leaderTerm, leaderID, prevLogIndex, prevLogTerm int, entries []LogEntry, leaderCommit int) (AppendEntriesResult, error)
+}
+
+// AppendEntriesResult is a follower's reply to AppendEntries, as plain
+// values so it can live in this package (see the import-cycle note on
+// Transport above).
+type AppendEntriesResult struct {
+	// Term is the follower's current term, so a stale leader can
+	// discover it's been superseded and step down.
+	Term int
+	// Success is true if the follower's log matched prevLogIndex/
+	// prevLogTerm and the entries were accepted.
+	Success bool
+
+	// ConflictTerm and ConflictIndex are only meaningful when Success
+	// is false because of a log mismatch. They let the leader back up
+	// NextIndex by a whole term at a time instead of one entry per
+	// round (the optimization described at the end of the Raft paper's
+	// §5.3; see append.go for how they're filled in and heartbeat.go
+	// for how they're used).
 	//
-	// Returns the responder's current term (so a stale Leader can
-	// discover it's been superseded and step down) and whether it
-	// reported success. A non-nil error means the RPC itself failed,
-	// which a Leader treats the same way a Candidate treats a failed
-	// RequestVote: that one peer just didn't get this round's message.
-	SendAppendEntries(peerAddr string, leaderTerm, leaderID, prevLogIndex, prevLogTerm int, entries []LogEntry, leaderCommit int) (term int, success bool, err error)
+	// ConflictTerm is the term of the follower's entry at prevLogIndex,
+	// or 0 if the follower's log is too short to have one.
+	// ConflictIndex is the first index the follower holds for
+	// ConflictTerm, or, when ConflictTerm is 0, one past the end of the
+	// follower's log.
+	ConflictTerm  int
+	ConflictIndex int
 }

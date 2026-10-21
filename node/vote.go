@@ -28,10 +28,13 @@ func (n *Node) HandleRequestVote(candidateTerm, candidateID, candidateLastLogInd
 	// once a newer term is known to exist, and starting the new term
 	// also clears our old vote, since VotedFor only has meaning within a
 	// single term.
+	//
+	// Only on a strictly newer term: a node (even a Leader) receiving a
+	// RequestVote for its OWN current term must not step down — that's
+	// just a rival candidate it will refuse below. See stepDownLocked in
+	// state.go.
 	if candidateTerm > n.persistent.CurrentTerm {
-		n.persistent.CurrentTerm = candidateTerm
-		n.state = Follower
-		n.persistent.VotedFor = -1
+		n.stepDownLocked(candidateTerm)
 	}
 
 	// Case 1: the candidate's term is stale (older than ours, even after
@@ -80,16 +83,4 @@ func (n *Node) HandleRequestVote(candidateTerm, candidateID, candidateLastLogInd
 	n.resetElectionTimerLocked()
 
 	return n.persistent.CurrentTerm, true
-}
-
-// lastLogIndexAndTermLocked returns the index and term of this node's last
-// log entry, or (0, 0) if the log is empty — consistent with LogEntry's
-// convention that index 0 is a reserved "no entry" sentinel, never a real
-// entry's index. Must be called with n.mu held.
-func (n *Node) lastLogIndexAndTermLocked() (index int, term int) {
-	if len(n.persistent.Log) == 0 {
-		return 0, 0
-	}
-	last := n.persistent.Log[len(n.persistent.Log)-1]
-	return last.Index, last.Term
 }

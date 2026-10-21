@@ -87,8 +87,9 @@ type VolatileState struct {
 	// monotonically, and is always <= CommitIndex.
 	LastApplied int
 
-	// --- Leader-only volatile state. Reinitialized after every
-	// election; nil/empty on nodes that are not currently the leader. ---
+	// --- Leader-only volatile state. Built by becomeLeaderLocked on
+	// every election win, and cleared back to nil by stepDownLocked
+	// (state.go) the moment a node stops being leader. ---
 
 	// NextIndex tracks, for each other node, the index of the next log
 	// entry the leader believes it needs to send to that node.

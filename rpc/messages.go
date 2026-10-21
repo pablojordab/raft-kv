@@ -71,4 +71,10 @@ type AppendEntriesReply struct {
 	// Success is true if the receiver's log matched PrevLogIndex/
 	// PrevLogTerm, meaning the new entries (if any) were accepted.
 	Success bool
+	// ConflictTerm and ConflictIndex are the receiver's hint for the
+	// leader when Success is false because of a log mismatch, so the
+	// leader can skip back a whole term at once. See
+	// node.AppendEntriesResult for their exact meaning.
+	ConflictTerm  int
+	ConflictIndex int
 }
