@@ -35,7 +35,16 @@ func (s *RaftServer) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply)
 	return nil
 }
 
-// AppendEntries is not implemented yet — that's task 13 (log replication),
-// not this one. Left out entirely rather than stubbed, so a missing
-// implementation shows up as a compile error wherever it's expected,
-// instead of a silent no-op at runtime.
+// AppendEntries is the net/rpc entry point for the AppendEntries RPC. As
+// of this version it's wired for the heartbeat case (Entries empty): a
+// leader asserting "I'm still in charge" to keep followers from timing
+// out. The real §5.3 log-consistency check and entry-appending logic
+// (Block 2) live in node.Node.HandleAppendEntries's future extension;
+// this method only unpacks args, calls it, and packs the result into
+// reply, exactly like RequestVote above.
+func (s *RaftServer) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
+	term, success := s.node.HandleAppendEntries(args.Term, args.LeaderID, args.PrevLogIndex, args.PrevLogTerm, args.Entries, args.LeaderCommit)
+	reply.Term = term
+	reply.Success = success
+	return nil
+}

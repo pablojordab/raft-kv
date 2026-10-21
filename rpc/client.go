@@ -55,16 +55,9 @@ func (t *NetRPCTransport) SendRequestVote(peerAddr string, candidateTerm, candid
 }
 
 // SendAppendEntries dials peerAddr and issues an AppendEntries RPC,
-// satisfying node.Transport.
-//
-// As of task 8, RaftServer has no AppendEntries method yet (it's task
-// 13's responsibility — see server.go) — so every call made here will
-// fail with an "rpc: can't find method" error until then. That's fine for
-// now: a Leader already treats a failed heartbeat call as "this peer
-// didn't get the message this round" rather than something fatal (see
-// node/heartbeat.go), exactly like a failed RequestVote during an
-// election. Once task 13 adds the receiver, these same calls start
-// actually landing.
+// satisfying node.Transport. RaftServer.AppendEntries (server.go) now
+// handles the heartbeat case these calls carry (Entries always nil, for
+// now); real log replication is still Block 2.
 func (t *NetRPCTransport) SendAppendEntries(peerAddr string, leaderTerm, leaderID, prevLogIndex, prevLogTerm int, entries []node.LogEntry, leaderCommit int) (term int, success bool, err error) {
 	client, dialErr := rpc.Dial("tcp", peerAddr)
 	if dialErr != nil {
