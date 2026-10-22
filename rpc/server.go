@@ -1,6 +1,10 @@
 package rpc
 
-import "github.com/pablojordab/raft-kv/node"
+import (
+	"time"
+
+	"github.com/pablojordab/raft-kv/node"
+)
 
 // RaftServer adapts a *node.Node's pure consensus logic to the method
 // shape Go's net/rpc requires (func(*ArgsType, *ReplyType) error, both
@@ -46,5 +50,33 @@ func (s *RaftServer) AppendEntries(args *AppendEntriesArgs, reply *AppendEntries
 	reply.Success = res.Success
 	reply.ConflictTerm = res.ConflictTerm
 	reply.ConflictIndex = res.ConflictIndex
+	return nil
+}
+
+// submitCommitTimeout bounds how long a Submit RPC waits for the client's
+// command to commit before answering with Committed=false (outcome
+// unknown). A healthy cluster commits within one or two replication rounds
+// (~50-100ms); 2s leaves room for slow peers without hanging a client
+// forever when the leader can't reach a majority.
+const submitCommitTimeout = 2 * time.Second
+
+// Submit is the client-facing RPC (see cmd/client): it appends a command to
+// the replicated log through this node and waits until it's committed.
+//
+// If this node isn't the leader, nothing is appended and the reply carries
+// IsLeader=false plus this node's best guess of who the leader is, so the
+// client can redirect. On the leader, the reply is sent only once the entry
+// is committed (Committed=true) or the wait times out (Committed=false,
+// outcome unknown — see node.WaitForCommit).
+func (s *RaftServer) Submit(args *SubmitArgs, reply *SubmitReply) error {
+	index, term, isLeader := s.node.Submit(args.Command)
+	reply.IsLeader = isLeader
+	reply.LeaderID = s.node.LeaderID()
+	if !isLeader {
+		return nil
+	}
+	reply.Index = index
+	reply.Term = term
+	reply.Committed = s.node.WaitForCommit(index, term, submitCommitTimeout)
 	return nil
 }

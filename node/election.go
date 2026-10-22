@@ -159,6 +159,7 @@ func (n *Node) becomeCandidateLocked(ctx context.Context) {
 	n.persistent.CurrentTerm++
 	n.state = Candidate
 	n.persistent.VotedFor = n.id // a candidate always votes for itself
+	n.leaderID = -1              // new term: no leader known for it yet
 	n.electionResetEvent = time.Now()
 
 	term := n.persistent.CurrentTerm

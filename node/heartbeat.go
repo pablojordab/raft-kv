@@ -194,6 +194,12 @@ func (n *Node) handleAppendEntriesReplyLocked(term int, req appendEntriesRequest
 	if matched+1 > n.volatile.NextIndex[req.peerID] {
 		n.volatile.NextIndex[req.peerID] = matched + 1
 	}
+
+	// A MatchIndex may have just grown, so a new index may now be on a
+	// majority: see whether CommitIndex can move forward (commit.go).
+	// Followers learn the new CommitIndex from the leaderCommit field of
+	// the next round's AppendEntries (append.go, rule 5).
+	n.advanceCommitIndexLocked()
 	return true
 }
 

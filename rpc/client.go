@@ -1,7 +1,10 @@
 package rpc
 
 import (
+	"fmt"
+	"net"
 	"net/rpc"
+	"time"
 
 	"github.com/pablojordab/raft-kv/node"
 )
@@ -83,4 +86,40 @@ func (t *NetRPCTransport) SendAppendEntries(peerAddr string, leaderTerm, leaderI
 		ConflictTerm:  reply.ConflictTerm,
 		ConflictIndex: reply.ConflictIndex,
 	}, nil
+}
+
+// clientDialTimeout bounds how long SubmitCommand waits to connect to a
+// node. Connecting to a dead node on localhost fails immediately anyway;
+// this mostly protects against unreachable addresses on a real network.
+const clientDialTimeout = 1 * time.Second
+
+// SubmitCommand sends a command to the node at addr through its
+// client-facing Submit RPC (server.go) and returns that node's reply. It's
+// the building block of cmd/client: the caller inspects the reply to
+// decide whether to follow the LeaderID hint, try another node, or report
+// the result.
+//
+// Unlike SendRequestVote/SendAppendEntries, this bounds the whole call,
+// not just the dial: the server may legitimately take up to
+// submitCommitTimeout to answer, and a client must never hang forever on a
+// node that accepted the connection but stopped responding.
+func SubmitCommand(addr string, command []byte) (SubmitReply, error) {
+	conn, err := net.DialTimeout("tcp", addr, clientDialTimeout)
+	if err != nil {
+		return SubmitReply{}, err
+	}
+	client := rpc.NewClient(conn)
+	defer client.Close()
+
+	var reply SubmitReply
+	call := client.Go("RaftServer.Submit", &SubmitArgs{Command: command}, &reply, nil)
+	select {
+	case <-call.Done:
+		if call.Error != nil {
+			return SubmitReply{}, call.Error
+		}
+		return reply, nil
+	case <-time.After(submitCommitTimeout + clientDialTimeout):
+		return SubmitReply{}, fmt.Errorf("no reply from %s within %v", addr, submitCommitTimeout+clientDialTimeout)
+	}
 }

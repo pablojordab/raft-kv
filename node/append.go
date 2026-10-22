@@ -35,6 +35,10 @@ func (n *Node) HandleAppendEntries(leaderTerm, leaderID, prevLogIndex, prevLogTe
 	// stepDownLocked (state.go) implements exactly that rule.
 	n.stepDownLocked(leaderTerm)
 
+	// Remember who the leader is, so clients that contact us can be
+	// redirected to it (Submit in rpc/server.go).
+	n.leaderID = leaderID
+
 	// Hearing from the current leader postpones our own election
 	// timeout. This happens BEFORE the log-consistency check below on
 	// purpose: even if our log doesn't match yet (rule 2 fails), the

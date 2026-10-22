@@ -103,8 +103,8 @@ func serveConnections(listener net.Listener) {
 	}
 }
 
-// logStatePeriodically prints this node's current role and term once a
-// second until ctx is cancelled. node.NodeState implements Stringer (see
+// logStatePeriodically prints this node's current role, term, log length
+// and commit index once a second until ctx is cancelled. node.NodeState implements Stringer (see
 // node/types.go), so %s prints "Follower"/"Candidate"/"Leader" rather than
 // a bare integer.
 func logStatePeriodically(ctx context.Context, n *node.Node) {
@@ -115,7 +115,10 @@ func logStatePeriodically(ctx context.Context, n *node.Node) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			log.Printf("[node %d] state=%s term=%d", n.ID(), n.State(), n.CurrentTerm())
+			// Keep "state=... term=..." first and unchanged: the test
+			// scripts in test/ parse exactly that prefix.
+			log.Printf("[node %d] state=%s term=%d log=%d commit=%d",
+				n.ID(), n.State(), n.CurrentTerm(), n.LogLength(), n.CommitIndex())
 		}
 	}
 }

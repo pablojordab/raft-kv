@@ -126,6 +126,7 @@ func (n *Node) runElectionCampaign(ctx context.Context, term int) {
 // n.mu held.
 func (n *Node) becomeLeaderLocked(ctx context.Context) {
 	n.state = Leader
+	n.leaderID = n.id
 
 	// NextIndex/MatchIndex are leader-only bookkeeping for log
 	// replication (Block 2): NextIndex starts optimistically at "one past

@@ -48,6 +48,14 @@ type Node struct {
 	// than using time.Timer.Reset — see election.go's doc comment for
 	// why that avoids a well-known class of timer-reset races in Go.
 	electionResetEvent time.Time
+
+	// leaderID is the id of the node this one believes is the leader of
+	// its current term, or -1 if it doesn't know yet (e.g. mid-election).
+	// It's only a hint, used to redirect clients that contacted a
+	// follower (see Submit in rpc/server.go): it's learned from accepted
+	// AppendEntries (append.go), set to our own id when we win an
+	// election, and cleared whenever our term advances.
+	leaderID int
 }
 
 // NewNode constructs a Node in the initial state every Raft server starts
@@ -85,6 +93,7 @@ func NewNode(id int, peers map[int]string, transport Transport) *Node {
 		// created node gets a full timeout window before its first
 		// election, same as if it had just heard from a leader.
 		electionResetEvent: time.Now(),
+		leaderID:           -1, // no leader known yet
 	}
 }
 

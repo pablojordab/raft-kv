@@ -31,6 +31,7 @@ func (n *Node) stepDownLocked(newTerm int) {
 	if newTerm > n.persistent.CurrentTerm {
 		n.persistent.CurrentTerm = newTerm
 		n.persistent.VotedFor = -1
+		n.leaderID = -1 // whoever led the old term doesn't lead this one
 	}
 	n.state = Follower
 	n.volatile.NextIndex = nil
@@ -106,6 +107,15 @@ func (n *Node) LastApplied() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.volatile.LastApplied
+}
+
+// LeaderID returns the id of the node this one believes leads its current
+// term, or -1 if it doesn't know. It's a hint for redirecting clients, not
+// a guarantee: the leader may have just crashed or been replaced.
+func (n *Node) LeaderID() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.leaderID
 }
 
 // LogLength returns how many entries this node's log currently holds.

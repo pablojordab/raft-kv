@@ -39,6 +39,36 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+// SubmitArgs is sent by a client (cmd/client) to ask the cluster to apply
+// a command. It isn't part of the Raft paper's Figure 2: it's this
+// project's client-facing RPC, served by the same RaftServer.
+type SubmitArgs struct {
+	// Command is the opaque command to append to the replicated log,
+	// e.g. "SET x 1". Raft itself never interprets it.
+	Command []byte
+}
+
+// SubmitReply is the node's answer to a SubmitArgs.
+type SubmitReply struct {
+	// IsLeader is false if the contacted node isn't the leader; the
+	// command was then NOT accepted, and the client should retry
+	// elsewhere.
+	IsLeader bool
+	// LeaderID is the id of the node the contacted node believes is
+	// the leader, or -1 if unknown (e.g. an election is in progress).
+	// Clients use it to go straight to the leader.
+	LeaderID int
+	// Index and Term identify the log entry the command was stored in
+	// (only meaningful when IsLeader is true).
+	Index int
+	Term  int
+	// Committed is true if that entry was committed (stored on a
+	// majority) before the server's wait timed out. If IsLeader is true
+	// but Committed is false, the outcome is UNKNOWN: the command may
+	// still commit later, or may have been lost in a leader change.
+	Committed bool
+}
+
 // AppendEntriesArgs is sent by the leader both to replicate log entries
 // and as a heartbeat (when Entries is empty), per the Raft paper (Figure
 // 2, "AppendEntries RPC").
