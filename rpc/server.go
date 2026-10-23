@@ -80,3 +80,18 @@ func (s *RaftServer) Submit(args *SubmitArgs, reply *SubmitReply) error {
 	reply.Committed = s.node.WaitForCommit(index, term, submitCommitTimeout)
 	return nil
 }
+
+// Status returns a snapshot of this node's state, including a copy of its
+// whole log. Read-only: it never changes the node. It's how process-level
+// tests (test/) inspect what each node stores.
+func (s *RaftServer) Status(args *StatusArgs, reply *StatusReply) error {
+	st := s.node.Status()
+	reply.ID = st.ID
+	reply.State = st.State.String()
+	reply.Term = st.Term
+	reply.LeaderID = st.LeaderID
+	reply.CommitIndex = st.CommitIndex
+	reply.LastApplied = st.LastApplied
+	reply.Log = st.Log
+	return nil
+}

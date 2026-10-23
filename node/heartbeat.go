@@ -235,6 +235,24 @@ func (n *Node) backUpNextIndexLocked(req appendEntriesRequest, reply AppendEntri
 		return
 	}
 
+	// The follower lost entries we had recorded as replicated on it: it
+	// reports a log SHORTER than its MatchIndex. With persistent storage
+	// this can't happen, but without it (see Block 4) a follower that
+	// crashes and restarts comes back with an empty log. Our MatchIndex
+	// for it is then false, so correct it down to what the follower
+	// actually has. Lowering it is safe: MatchIndex only feeds commit
+	// counting (commit.go), where a lower value can only make the leader
+	// more conservative, and entries already committed stay committed.
+	// It also lifts the MatchIndex+1 floor below, which would otherwise
+	// force the leader to walk back one entry per round to an amnesiac
+	// follower — found by TestFollowerCrashAndRecovery, where a follower
+	// that lost 5 entries took 5 rounds to recover instead of 1.
+	if reply.ConflictTerm == 0 && reply.ConflictIndex-1 < n.volatile.MatchIndex[req.peerID] {
+		log.Printf("[node %d] peer %d has only %d entries but MatchIndex was %d: it lost its log (restart without persistence?)",
+			n.id, req.peerID, reply.ConflictIndex-1, n.volatile.MatchIndex[req.peerID])
+		n.volatile.MatchIndex[req.peerID] = reply.ConflictIndex - 1
+	}
+
 	next := reply.ConflictIndex
 	if reply.ConflictTerm != 0 {
 		if last := n.lastIndexOfTermLocked(reply.ConflictTerm); last > 0 {

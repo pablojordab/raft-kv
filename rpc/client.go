@@ -123,3 +123,27 @@ func SubmitCommand(addr string, command []byte) (SubmitReply, error) {
 		return SubmitReply{}, fmt.Errorf("no reply from %s within %v", addr, submitCommitTimeout+clientDialTimeout)
 	}
 }
+
+// FetchStatus asks the node at addr for its state snapshot (the Status RPC
+// in server.go). Like SubmitCommand, the whole call is bounded so a test
+// can never hang on a node that stopped responding.
+func FetchStatus(addr string) (StatusReply, error) {
+	conn, err := net.DialTimeout("tcp", addr, clientDialTimeout)
+	if err != nil {
+		return StatusReply{}, err
+	}
+	client := rpc.NewClient(conn)
+	defer client.Close()
+
+	var reply StatusReply
+	call := client.Go("RaftServer.Status", &StatusArgs{}, &reply, nil)
+	select {
+	case <-call.Done:
+		if call.Error != nil {
+			return StatusReply{}, call.Error
+		}
+		return reply, nil
+	case <-time.After(clientDialTimeout):
+		return StatusReply{}, fmt.Errorf("no status reply from %s within %v", addr, clientDialTimeout)
+	}
+}

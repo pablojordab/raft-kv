@@ -69,6 +69,24 @@ type SubmitReply struct {
 	Committed bool
 }
 
+// StatusArgs requests a snapshot of a node's state. It carries no fields;
+// net/rpc just requires every RPC to have an args type.
+type StatusArgs struct{}
+
+// StatusReply is a node's state snapshot (see node.Status). Like Submit,
+// it isn't part of the Raft protocol: it exists so tests and tools can
+// check, from outside the process, what each node actually stores — e.g.
+// that every node ended up with an identical log.
+type StatusReply struct {
+	ID          int
+	State       string // "Follower", "Candidate" or "Leader"
+	Term        int
+	LeaderID    int
+	CommitIndex int
+	LastApplied int
+	Log         []node.LogEntry
+}
+
 // AppendEntriesArgs is sent by the leader both to replicate log entries
 // and as a heartbeat (when Entries is empty), per the Raft paper (Figure
 // 2, "AppendEntries RPC").

@@ -109,6 +109,37 @@ func (n *Node) LastApplied() int {
 	return n.volatile.LastApplied
 }
 
+// Status is a point-in-time snapshot of a node's Raft state, for tests and
+// debugging tools (see the Status RPC in rpc/server.go). Everything in it
+// is a copy: changing it never affects the node.
+type Status struct {
+	ID          int
+	State       NodeState
+	Term        int
+	LeaderID    int
+	CommitIndex int
+	LastApplied int
+	Log         []LogEntry
+}
+
+// Status returns a consistent snapshot of this node's state: every field
+// is read under one acquisition of the lock, so the log, term and commit
+// index all describe the same instant (reading them through separate
+// accessors could mix values from before and after a concurrent update).
+func (n *Node) Status() Status {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return Status{
+		ID:          n.id,
+		State:       n.state,
+		Term:        n.persistent.CurrentTerm,
+		LeaderID:    n.leaderID,
+		CommitIndex: n.volatile.CommitIndex,
+		LastApplied: n.volatile.LastApplied,
+		Log:         n.entriesFromLocked(1), // a copy of the whole log
+	}
+}
+
 // LeaderID returns the id of the node this one believes leads its current
 // term, or -1 if it doesn't know. It's a hint for redirecting clients, not
 // a guarantee: the leader may have just crashed or been replaced.
