@@ -1,6 +1,7 @@
 package node
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -56,6 +57,15 @@ type Node struct {
 	// AppendEntries (append.go), set to our own id when we win an
 	// election, and cleared whenever our term advances.
 	leaderID int
+
+	// logger writes this node's structured log events (log/slog). Every
+	// event carries node=<id>; call sites add the fields that matter for
+	// that event (term, state, peer, index...), so logs from several
+	// processes can be merged and filtered by field instead of parsed
+	// with regexes. It's derived from slog.Default() when the node is
+	// created, so cmd/main.go chooses the format and level for the whole
+	// process just by setting the default logger first.
+	logger *slog.Logger
 }
 
 // NewNode constructs a Node in the initial state every Raft server starts
@@ -94,6 +104,7 @@ func NewNode(id int, peers map[int]string, transport Transport) *Node {
 		// election, same as if it had just heard from a leader.
 		electionResetEvent: time.Now(),
 		leaderID:           -1, // no leader known yet
+		logger:             slog.Default().With("node", id),
 	}
 }
 

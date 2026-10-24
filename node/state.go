@@ -28,6 +28,8 @@ package node
 //
 // Must be called with n.mu held.
 func (n *Node) stepDownLocked(newTerm int) {
+	prevState, prevTerm := n.state, n.persistent.CurrentTerm
+
 	if newTerm > n.persistent.CurrentTerm {
 		n.persistent.CurrentTerm = newTerm
 		n.persistent.VotedFor = -1
@@ -36,6 +38,19 @@ func (n *Node) stepDownLocked(newTerm int) {
 	n.state = Follower
 	n.volatile.NextIndex = nil
 	n.volatile.MatchIndex = nil
+
+	// Log only actual transitions. This runs on every heartbeat a
+	// follower receives, and "Follower stays Follower in the same term"
+	// isn't an event worth recording.
+	switch {
+	case prevState != Follower:
+		// A Candidate or Leader giving up its role.
+		n.logger.Info("stepped down", "term", n.persistent.CurrentTerm,
+			"prevState", prevState.String(), "prevTerm", prevTerm)
+	case prevTerm != n.persistent.CurrentTerm:
+		// Already a Follower, just learning that a newer term began.
+		n.logger.Info("adopted newer term", "term", n.persistent.CurrentTerm, "prevTerm", prevTerm)
+	}
 }
 
 // lastLogIndexAndTermLocked returns the index and term of this node's last

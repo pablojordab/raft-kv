@@ -1,7 +1,5 @@
 package node
 
-import "log"
-
 // advanceCommitIndexLocked moves the leader's CommitIndex forward to the
 // highest log index that is safe to consider committed, per the last rule
 // of the Raft paper's Figure 2 ("Rules for Servers", Leaders):
@@ -60,8 +58,8 @@ func (n *Node) advanceCommitIndexLocked() {
 
 		// Strict majority: more than half of the whole cluster.
 		if replicas*2 > clusterSize {
-			log.Printf("[node %d] committed up to index %d (term %d, on %d/%d nodes)",
-				n.id, index, entryTerm, replicas, clusterSize)
+			n.logger.Debug("committed", "term", n.persistent.CurrentTerm,
+				"commitIndex", index, "replicas", replicas, "clusterSize", clusterSize)
 			n.volatile.CommitIndex = index
 			return
 		}

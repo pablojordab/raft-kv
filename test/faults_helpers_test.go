@@ -2,8 +2,6 @@ package test
 
 import (
 	"fmt"
-	"os/exec"
-	"strconv"
 	"testing"
 	"time"
 
@@ -64,25 +62,20 @@ func startProxiedCluster(t *testing.T, bin string, size, basePort int) *proxiedC
 	}
 
 	for id := 1; id <= size; id++ {
-		c.nodes = append(c.nodes, c.launch(id, realAddr(id)))
+		c.nodes = append(c.nodes, c.launch(id, realAddr(id), &syncBuffer{}))
 	}
 	t.Cleanup(func() {
 		for _, n := range c.nodes {
 			n.kill()
 		}
 	})
+	registerLogChecks(t, func() []*testNode { return c.nodes })
 	return c
 }
 
-func (c *proxiedCluster) launch(id int, addr string) *testNode {
+func (c *proxiedCluster) launch(id int, addr string, logs *syncBuffer) *testNode {
 	c.t.Helper()
-	logs := &syncBuffer{}
-	cmd := exec.Command(c.bin, "-id="+strconv.Itoa(id), "-addr="+addr, "-peers="+c.peersFlag[id])
-	cmd.Stdout = logs
-	cmd.Stderr = logs
-	if err := cmd.Start(); err != nil {
-		c.t.Fatalf("starting node %d: %v", id, err)
-	}
+	cmd := startNodeProcess(c.t, c.bin, id, addr, c.peersFlag[id], logs)
 	return &testNode{id: id, addr: addr, cmd: cmd, logs: logs}
 }
 
@@ -104,7 +97,10 @@ func (c *proxiedCluster) restart(id int) *testNode {
 			links[id].setTarget(newAddr)
 		}
 	}
-	n := c.launch(id, newAddr)
+	// The restarted process appends to the same log buffer as the killed
+	// one, so the node's history (and the failure timeline) covers both
+	// lives, in order.
+	n := c.launch(id, newAddr, c.node(id).logs)
 	c.nodes[id-1] = n
 	return n
 }

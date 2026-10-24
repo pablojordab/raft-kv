@@ -13,7 +13,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/rpc"
 	"os"
@@ -31,15 +31,29 @@ func main() {
 	id := flag.Int("id", 0, "this node's own numeric ID (must be unique within the cluster)")
 	addr := flag.String("addr", "", "address this node listens on, e.g. 127.0.0.1:9001")
 	peersFlag := flag.String("peers", "", "comma-separated peerID=address pairs, e.g. 2=127.0.0.1:9002,3=127.0.0.1:9003")
+	logFormat := flag.String("log-format", "text", "log output format: text (human-readable key=value) or json (one JSON object per line)")
+	logLevel := flag.String("log-level", "info", "minimum log level: debug, info, warn or error")
 	flag.Parse()
 
+	// Configure the process-wide default logger BEFORE creating the node:
+	// node.NewNode derives its logger from slog.Default(). SetDefault also
+	// routes anything written through the standard "log" package (e.g. by
+	// net/rpc) into the same handler, so every line has the same format.
+	logger, err := newLogger(*logFormat, *logLevel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	slog.SetDefault(logger)
+	logger = logger.With("node", *id)
+
 	if *addr == "" {
-		log.Fatal("missing required -addr flag")
+		fatal(logger, "missing required -addr flag")
 	}
 
 	peers, err := parsePeers(*peersFlag)
 	if err != nil {
-		log.Fatalf("invalid -peers: %v", err)
+		fatal(logger, "invalid -peers", "err", err)
 	}
 
 	// NetRPCTransport (rpc/client.go) is how this node will call
@@ -53,14 +67,14 @@ func main() {
 	// listener started below.
 	server := raftrpc.NewRaftServer(n)
 	if err := rpc.Register(server); err != nil {
-		log.Fatalf("rpc.Register failed: %v", err)
+		fatal(logger, "rpc.Register failed", "err", err)
 	}
 
 	listener, err := net.Listen("tcp", *addr)
 	if err != nil {
-		log.Fatalf("failed to listen on %s: %v", *addr, err)
+		fatal(logger, "failed to listen", "addr", *addr, "err", err)
 	}
-	log.Printf("[node %d] listening on %s, peers=%v", *id, *addr, peers)
+	logger.Info("listening", "addr", *addr, "peers", fmt.Sprint(peers))
 
 	// Accept connections until the listener is closed during shutdown
 	// (serveConnections returns cleanly in that case, logging nothing).
@@ -78,11 +92,11 @@ func main() {
 	// "watch an election happen" across three separate terminals is to
 	// have each one log its own state on its own, since there's no
 	// shared process to inspect.
-	go logStatePeriodically(ctx, n)
+	go logStatePeriodically(ctx, n, logger)
 
 	waitForShutdownSignal()
 
-	log.Printf("[node %d] shutting down", *id)
+	logger.Info("shutting down")
 	cancel()
 	listener.Close()
 }
@@ -103,11 +117,14 @@ func serveConnections(listener net.Listener) {
 	}
 }
 
-// logStatePeriodically prints this node's current role, term, log length
-// and commit index once a second until ctx is cancelled. node.NodeState implements Stringer (see
-// node/types.go), so %s prints "Follower"/"Candidate"/"Leader" rather than
-// a bare integer.
-func logStatePeriodically(ctx context.Context, n *node.Node) {
+// logStatePeriodically logs a "status" event once a second until ctx is
+// cancelled, with this node's role, term, log length and commit index.
+//
+// The fields are read from one node.Status snapshot, so they always
+// describe the same instant. Keep "state" and "term" as the first two
+// fields, adjacent: in text format the line then contains
+// "state=Leader term=3", which test/election_check.sh and .ps1 look for.
+func logStatePeriodically(ctx context.Context, n *node.Node, logger *slog.Logger) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -115,12 +132,37 @@ func logStatePeriodically(ctx context.Context, n *node.Node) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Keep "state=... term=..." first and unchanged: the test
-			// scripts in test/ parse exactly that prefix.
-			log.Printf("[node %d] state=%s term=%d log=%d commit=%d",
-				n.ID(), n.State(), n.CurrentTerm(), n.LogLength(), n.CommitIndex())
+			st := n.Status()
+			logger.Info("status", "state", st.State.String(), "term", st.Term,
+				"log", len(st.Log), "commit", st.CommitIndex, "leader", st.LeaderID)
 		}
 	}
+}
+
+// newLogger builds the process's logger from the -log-format and
+// -log-level flags. Text output (the default) is meant for people
+// watching a terminal; JSON is meant for tools, such as the tests in test/,
+// which merge the logs of several node processes into one timeline.
+func newLogger(format, level string) (*slog.Logger, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("invalid -log-level %q (want debug, info, warn or error)", level)
+	}
+	opts := &slog.HandlerOptions{Level: lvl}
+	switch format {
+	case "text":
+		return slog.New(slog.NewTextHandler(os.Stderr, opts)), nil
+	case "json":
+		return slog.New(slog.NewJSONHandler(os.Stderr, opts)), nil
+	default:
+		return nil, fmt.Errorf("invalid -log-format %q (want text or json)", format)
+	}
+}
+
+// fatal logs an error and exits: slog has no Fatal level of its own.
+func fatal(logger *slog.Logger, msg string, args ...any) {
+	logger.Error(msg, args...)
+	os.Exit(1)
 }
 
 // waitForShutdownSignal blocks until this process receives SIGINT

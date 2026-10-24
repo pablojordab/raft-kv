@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"log"
 )
 
 // runElectionCampaign is the Candidate-side half of leader election (the
@@ -76,7 +75,7 @@ func (n *Node) runElectionCampaign(ctx context.Context, term int) {
 			return
 		case res := <-results:
 			if res.err != nil {
-				log.Printf("[node %d] RequestVote to peer %d failed: %v", n.id, res.peerID, res.err)
+				n.logger.Debug("request vote failed", "term", term, "peer", res.peerID, "err", res.err)
 				continue
 			}
 
@@ -144,7 +143,7 @@ func (n *Node) becomeLeaderLocked(ctx context.Context) {
 	n.volatile.MatchIndex = matchIndex
 
 	term := n.persistent.CurrentTerm
-	log.Printf("[node %d] won election for term %d — becoming Leader", n.id, term)
+	n.logger.Info("became leader", "term", term, "lastLogIndex", lastLogIndex)
 
 	// A Leader must immediately start asserting itself with heartbeats
 	// (see heartbeat.go) — every other node is still running its own

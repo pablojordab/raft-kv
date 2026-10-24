@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"log"
 	"math/rand"
 	"time"
 )
@@ -93,7 +92,7 @@ func (n *Node) RunElectionTimer(ctx context.Context) {
 	termWatched := n.persistent.CurrentTerm
 	n.mu.Unlock()
 
-	log.Printf("[node %d] election timer started for term %d (timeout %v)", n.id, termWatched, timeout)
+	n.logger.Debug("election timer started", "term", termWatched, "timeout", timeout.String())
 
 	ticker := time.NewTicker(electionTimerPollInterval)
 	defer ticker.Stop()
@@ -118,7 +117,7 @@ func (n *Node) RunElectionTimer(ctx context.Context) {
 		if n.persistent.CurrentTerm != termWatched {
 			timeout = randomElectionTimeout()
 			termWatched = n.persistent.CurrentTerm
-			log.Printf("[node %d] election timer resynced for term %d (timeout %v)", n.id, termWatched, timeout)
+			n.logger.Debug("election timer resynced", "term", termWatched, "timeout", timeout.String())
 			n.mu.Unlock()
 			continue
 		}
@@ -163,7 +162,7 @@ func (n *Node) becomeCandidateLocked(ctx context.Context) {
 	n.electionResetEvent = time.Now()
 
 	term := n.persistent.CurrentTerm
-	log.Printf("[node %d] election timeout: becoming Candidate for term %d", n.id, term)
+	n.logger.Info("became candidate", "term", term, "reason", "election timeout")
 
 	go n.runElectionCampaign(ctx, term)
 }

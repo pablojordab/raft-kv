@@ -73,6 +73,7 @@ func (n *Node) HandleRequestVote(candidateTerm, candidateID, candidateLastLogInd
 
 	// All checks passed: grant the vote.
 	n.persistent.VotedFor = candidateID
+	n.logger.Debug("granted vote", "term", n.persistent.CurrentTerm, "candidate", candidateID)
 
 	// Per the Raft paper's companion "Students' Guide to Raft": reset
 	// the election timer only when we actually GRANT a vote, not on

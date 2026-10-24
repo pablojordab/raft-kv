@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"sync"
@@ -33,9 +32,6 @@ const (
 	failoverBasePort    = 9200
 	replicationBasePort = 9300
 )
-
-// statusLine matches the periodic line cmd/main.go prints once a second.
-var statusLine = regexp.MustCompile(`state=(\w+) term=(\d+)`)
 
 // syncBuffer is a bytes.Buffer safe for one process writing to it while
 // the test goroutine reads from it concurrently.
@@ -65,16 +61,17 @@ type testNode struct {
 	dead bool
 }
 
-// lastStatus returns the node's most recently logged state and term, or
-// ok=false if it hasn't printed a status line yet.
+// lastStatus returns the state and term from the node's most recent
+// "status" log event (printed by cmd/main.go once a second), or ok=false if
+// it hasn't logged one yet.
 func (n *testNode) lastStatus() (state string, term int, ok bool) {
-	matches := statusLine.FindAllStringSubmatch(n.logs.String(), -1)
-	if len(matches) == 0 {
-		return "", 0, false
+	events := parseEvents(n.logs.String())
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Msg == "status" {
+			return events[i].str("state"), events[i].int("term"), true
+		}
 	}
-	last := matches[len(matches)-1]
-	term, _ = strconv.Atoi(last[2])
-	return last[1], term, true
+	return "", 0, false
 }
 
 func (n *testNode) kill() {
@@ -125,12 +122,7 @@ func startCluster(t *testing.T, bin string, size, basePort int) []*testNode {
 			peers += fmt.Sprintf("%d=%s", other, addrOf(other))
 		}
 		logs := &syncBuffer{}
-		cmd := exec.Command(bin, "-id="+strconv.Itoa(id), "-addr="+addrOf(id), "-peers="+peers)
-		cmd.Stdout = logs
-		cmd.Stderr = logs // Go's log package writes to stderr
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("starting node %d: %v", id, err)
-		}
+		cmd := startNodeProcess(t, bin, id, addrOf(id), peers, logs)
 		nodes = append(nodes, &testNode{id: id, addr: addrOf(id), cmd: cmd, logs: logs})
 	}
 	t.Cleanup(func() {
@@ -138,7 +130,25 @@ func startCluster(t *testing.T, bin string, size, basePort int) []*testNode {
 			n.kill()
 		}
 	})
+	registerLogChecks(t, func() []*testNode { return nodes })
 	return nodes
+}
+
+// startNodeProcess launches one node binary writing JSON logs at debug
+// level into logs. JSON makes every log line a structured event the tests
+// can parse (logevents_test.go); debug level makes sure the timeline
+// printed when a test fails includes every vote, rejection and commit.
+func startNodeProcess(t *testing.T, bin string, id int, addr, peers string, logs *syncBuffer) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(bin,
+		"-id="+strconv.Itoa(id), "-addr="+addr, "-peers="+peers,
+		"-log-format=json", "-log-level=debug")
+	cmd.Stdout = logs
+	cmd.Stderr = logs // slog writes to stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting node %d: %v", id, err)
+	}
+	return cmd
 }
 
 // clusterFlag renders the cluster in the -cluster format cmd/client takes:
@@ -176,7 +186,7 @@ func waitForStableLeader(t *testing.T, nodes []*testNode) (*testNode, int) {
 		}
 		time.Sleep(pollEvery)
 	}
-	t.Fatalf("no stable leader within %v; last logs:\n%s", electionWait, dumpLogs(nodes))
+	t.Fatalf("no stable leader within %v among nodes %v", electionWait, ids(nodes))
 	return nil, 0
 }
 
@@ -209,12 +219,4 @@ func currentLeader(nodes []*testNode) (*testNode, int, bool) {
 		}
 	}
 	return leader, term, leader != nil
-}
-
-func dumpLogs(nodes []*testNode) string {
-	out := ""
-	for _, n := range nodes {
-		out += fmt.Sprintf("--- node %d (dead=%v) ---\n%s\n", n.id, n.dead, n.logs.String())
-	}
-	return out
 }

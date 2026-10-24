@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"log"
 	"time"
 )
 
@@ -248,8 +247,8 @@ func (n *Node) backUpNextIndexLocked(req appendEntriesRequest, reply AppendEntri
 	// follower — found by TestFollowerCrashAndRecovery, where a follower
 	// that lost 5 entries took 5 rounds to recover instead of 1.
 	if reply.ConflictTerm == 0 && reply.ConflictIndex-1 < n.volatile.MatchIndex[req.peerID] {
-		log.Printf("[node %d] peer %d has only %d entries but MatchIndex was %d: it lost its log (restart without persistence?)",
-			n.id, req.peerID, reply.ConflictIndex-1, n.volatile.MatchIndex[req.peerID])
+		n.logger.Warn("follower lost its log", "term", n.persistent.CurrentTerm, "peer", req.peerID,
+			"followerLogLength", reply.ConflictIndex-1, "matchIndex", n.volatile.MatchIndex[req.peerID])
 		n.volatile.MatchIndex[req.peerID] = reply.ConflictIndex - 1
 	}
 
@@ -277,8 +276,9 @@ func (n *Node) backUpNextIndexLocked(req appendEntriesRequest, reply AppendEntri
 		next = 1
 	}
 
-	log.Printf("[node %d] peer %d rejected AppendEntries at prevLogIndex %d (conflict term %d, index %d); retrying from index %d",
-		n.id, req.peerID, req.prevLogIndex, reply.ConflictTerm, reply.ConflictIndex, next)
+	n.logger.Debug("append entries rejected", "term", n.persistent.CurrentTerm, "peer", req.peerID,
+		"prevLogIndex", req.prevLogIndex, "conflictTerm", reply.ConflictTerm,
+		"conflictIndex", reply.ConflictIndex, "nextIndex", next)
 	n.volatile.NextIndex[req.peerID] = next
 }
 
