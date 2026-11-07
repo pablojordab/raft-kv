@@ -27,10 +27,11 @@ func TestRestartedNodeRecoversItsStateFromDisk(t *testing.T) {
 	}
 	c := startPersistentProxiedCluster(t, buildNodeBinary(t), 3, restartBasePort)
 	leader, _ := waitForStableLeader(t, c.nodes)
+	lastIndex := 0
 	for i := 1; i <= 5; i++ {
-		mustCommit(t, c.nodes, fmt.Sprintf("SET k%d v%d", i, i))
+		lastIndex = mustCommit(t, c.nodes, fmt.Sprintf("SET k%d v%d", i, i))
 	}
-	waitForConvergence(t, c.nodes, 5, 3*time.Second)
+	waitForConvergence(t, c.nodes, lastIndex, 3*time.Second)
 
 	follower := others(c.nodes, leader.id)[0]
 	before := fetchStatus(t, follower)
@@ -67,8 +68,8 @@ func TestRestartedNodeRecoversItsStateFromDisk(t *testing.T) {
 
 	// 3. Back in the cluster, it keeps working normally.
 	c.heal()
-	mustCommit(t, c.nodes, "SET after restart x")
-	waitForConvergence(t, c.nodes, 6, 5*time.Second)
+	lastIndex = mustCommit(t, c.nodes, "SET after restart x")
+	waitForConvergence(t, c.nodes, lastIndex, 5*time.Second)
 }
 
 // TestWholeClusterRestartKeepsCommittedWrites kills every node at once, like
@@ -84,12 +85,13 @@ func TestWholeClusterRestartKeepsCommittedWrites(t *testing.T) {
 	waitForStableLeader(t, c.nodes)
 
 	var want []string
+	lastBefore := 0
 	for i := 1; i <= 5; i++ {
 		cmd := fmt.Sprintf("SET k%d v%d", i, i)
-		mustCommit(t, c.nodes, cmd)
+		lastBefore = mustCommit(t, c.nodes, cmd)
 		want = append(want, cmd)
 	}
-	waitForConvergence(t, c.nodes, 5, 3*time.Second)
+	waitForConvergence(t, c.nodes, lastBefore, 3*time.Second)
 
 	for _, n := range c.nodes {
 		n.kill()
@@ -104,19 +106,13 @@ func TestWholeClusterRestartKeepsCommittedWrites(t *testing.T) {
 	t.Logf("node %d elected in term %d after the full restart", newLeader.id, newTerm)
 
 	index := mustCommit(t, c.nodes, "SET after outage x")
-	if index != 6 {
-		t.Fatalf("first write after the restart went to index %d, want 6 (right after the 5 saved ones)", index)
+	if index <= lastBefore {
+		t.Fatalf("first write after the restart went to index %d, on top of the saved writes (which end at %d)", index, lastBefore)
 	}
 	want = append(want, "SET after outage x")
 
-	statuses := waitForConvergence(t, c.nodes, 6, 5*time.Second)
-	for _, st := range statuses {
-		for i, e := range st.Log {
-			if string(e.Command) != want[i] {
-				t.Fatalf("node %d entry %d = %q, want %q (log %s)", st.ID, i+1, e.Command, want[i], describeLog(st))
-			}
-		}
-	}
+	statuses := waitForConvergence(t, c.nodes, index, 5*time.Second)
+	requireCommands(t, statuses, want)
 	t.Logf("all 5 writes committed before the outage survived, followed by the new one")
 }
 
@@ -154,4 +150,48 @@ func waitForStatus(t *testing.T, n *testNode, timeout time.Duration) raftrpc.Sta
 		}
 		time.Sleep(pollEvery)
 	}
+}
+
+// TestSlowDiskCausesNoSpuriousElections reproduces, on any machine, the
+// failure first seen on Windows: there a save (an fsync) can take hundreds
+// of milliseconds, and a slow save made followers think the leader had
+// died, start elections in the middle of a write, and leave that write
+// stuck until the client gave up.
+//
+// Every save here takes 150ms longer than normal (-test-save-delay). With a
+// healthy leader and no failures, the cluster must commit every write, end
+// up with identical logs, and hold NO election after the first leader is
+// in place: a slow disk is not a dead leader.
+func TestSlowDiskCausesNoSpuriousElections(t *testing.T) {
+	if testing.Short() {
+		t.Skip("process-level test")
+	}
+	c := startPersistentProxiedCluster(t, buildNodeBinary(t), 3, slowDiskBasePort, "-test-save-delay=150ms")
+	leader, term := waitForStableLeader(t, c.nodes)
+	stableSince := time.Now()
+	t.Logf("leader: node %d in term %d; every save now takes 150ms extra", leader.id, term)
+
+	var want []string
+	lastIndex := 0
+	for i := 1; i <= 10; i++ {
+		cmd := fmt.Sprintf("SET k%d v%d", i, i)
+		lastIndex = mustCommit(t, c.nodes, cmd)
+		want = append(want, cmd)
+	}
+	statuses := waitForConvergence(t, c.nodes, lastIndex, 5*time.Second)
+	requireCommands(t, statuses, want)
+
+	var spurious []string
+	for _, e := range allEvents(c.nodes) {
+		if e.Time.After(stableSince) && e.Msg == "became candidate" {
+			spurious = append(spurious, fmt.Sprintf("node %d at %s (term %d)", e.Node, e.Time.Format("15:04:05.000"), e.int("term")))
+		}
+	}
+	if len(spurious) > 0 {
+		t.Fatalf("slow saves caused %d spurious election(s) with a healthy leader: %v", len(spurious), spurious)
+	}
+	if st := fetchStatus(t, leader); st.State != "Leader" || st.Term != term {
+		t.Fatalf("leader changed: node %d is now %s in term %d", leader.id, st.State, st.Term)
+	}
+	t.Logf("10 writes committed with a slow disk, no spurious elections, leader unchanged")
 }

@@ -6,7 +6,7 @@ import (
 )
 
 // heartbeatInterval is how often a Leader sends AppendEntries to every
-// peer. It must stay well under electionTimeoutMin (election.go), per the
+// peer. It must stay well under the election timeout (election.go), per the
 // Raft paper's §5.6 timing requirement: broadcast time << election
 // timeout. If heartbeats took longer to arrive than a follower's election
 // timeout, a perfectly healthy Leader would still get challenged by

@@ -1,5 +1,7 @@
 package node
 
+import "time"
+
 // This file groups the helpers that read or transition a Node's Raft state
 // (Figure 2 of the paper), so the rules for that state live in one place
 // instead of being re-implemented inline by every RPC handler.
@@ -28,13 +30,29 @@ package node
 //
 // Must be called with n.mu held.
 func (n *Node) stepDownLocked(newTerm int) {
+	if n.becomeFollowerLocked(newTerm) {
+		n.persistLocked() // new term and cleared vote must be durable
+	}
+}
+
+// becomeFollowerLocked performs the same transition as stepDownLocked but
+// does NOT save it, and reports whether the persistent state changed (a
+// newer term was adopted). It's for RPC handlers that may change more
+// persistent state in the same request and save everything ONCE, just
+// before replying: adopting a candidate's term and then granting it a vote
+// is one fsync instead of two, which halves how long a vote takes on a
+// slow disk (see SetElectionTimeout in election.go for why that matters).
+// The caller MUST save before replying if this returns true.
+//
+// Must be called with n.mu held.
+func (n *Node) becomeFollowerLocked(newTerm int) (persistentStateChanged bool) {
 	prevState, prevTerm := n.state, n.persistent.CurrentTerm
 
 	if newTerm > n.persistent.CurrentTerm {
 		n.persistent.CurrentTerm = newTerm
 		n.persistent.VotedFor = -1
-		n.leaderID = -1   // whoever led the old term doesn't lead this one
-		n.persistLocked() // new term and cleared vote must be durable
+		n.leaderID = -1 // whoever led the old term doesn't lead this one
+		persistentStateChanged = true
 	}
 	n.state = Follower
 	n.volatile.NextIndex = nil
@@ -52,6 +70,7 @@ func (n *Node) stepDownLocked(newTerm int) {
 		// Already a Follower, just learning that a newer term began.
 		n.logger.Info("adopted newer term", "term", n.persistent.CurrentTerm, "prevTerm", prevTerm)
 	}
+	return persistentStateChanged
 }
 
 // lastLogIndexAndTermLocked returns the index and term of this node's last
@@ -198,10 +217,27 @@ func (n *Node) persistLocked() {
 	if n.storage == nil {
 		return
 	}
-	if err := n.storage.Save(n.persistent); err != nil {
+	start := time.Now()
+	err := n.storage.Save(n.persistent)
+	if took := time.Since(start); took > slowSaveThreshold {
+		// The lock is held for the whole save, so a slow disk stalls
+		// this node: a leader sends no heartbeats meanwhile, and a long
+		// enough stall makes followers elect someone else. Logging it
+		// makes such stalls visible in the merged test timeline instead
+		// of showing up only as an unexplained election (etcd logs the
+		// same kind of warning for slow fdatasync calls).
+		n.logger.Warn("slow disk write", "took", took.String(), "term", n.persistent.CurrentTerm,
+			"logLength", len(n.persistent.Log))
+	}
+	if err != nil {
 		n.onPersistError(err)
 	}
 }
+
+// slowSaveThreshold is how long a save may take before persistLocked logs
+// a "slow disk write" warning. On a healthy disk a save takes well under a
+// millisecond to a few milliseconds.
+const slowSaveThreshold = 100 * time.Millisecond
 
 // RestorePersistentState loads previously saved state into a node that
 // hasn't started yet: after a restart, the node continues with the term,

@@ -20,6 +20,7 @@ const (
 	fiveNodeBasePort      = 9700
 	restartBasePort       = 9800
 	fullRestartBasePort   = 9900
+	slowDiskBasePort      = 10000
 )
 
 // proxiedCluster is a cluster whose nodes reach each other only through
@@ -39,6 +40,8 @@ type proxiedCluster struct {
 	// dataDirs[id] is node id's -data-dir, or empty if the cluster runs
 	// in memory only. A restarted node reuses the same directory.
 	dataDirs map[int]string
+	// extraArgs are passed to every node process, including restarts.
+	extraArgs []string
 }
 
 // startProxiedCluster starts an in-memory cluster: a restarted node comes
@@ -51,18 +54,19 @@ func startProxiedCluster(t *testing.T, bin string, size, basePort int) *proxiedC
 // startPersistentProxiedCluster starts a cluster whose nodes save their
 // state to disk (-data-dir, one temp directory per node), so a restarted
 // node comes back with the term, vote and log it had saved.
-func startPersistentProxiedCluster(t *testing.T, bin string, size, basePort int) *proxiedCluster {
+func startPersistentProxiedCluster(t *testing.T, bin string, size, basePort int, extraArgs ...string) *proxiedCluster {
 	t.Helper()
-	return newProxiedCluster(t, bin, size, basePort, true)
+	return newProxiedCluster(t, bin, size, basePort, true, extraArgs...)
 }
 
-func newProxiedCluster(t *testing.T, bin string, size, basePort int, persistent bool) *proxiedCluster {
+func newProxiedCluster(t *testing.T, bin string, size, basePort int, persistent bool, extraArgs ...string) *proxiedCluster {
 	t.Helper()
 	c := &proxiedCluster{
 		t: t, bin: bin, basePort: basePort,
 		links:     map[int]map[int]*linkProxy{},
 		peersFlag: map[int]string{},
 		dataDirs:  map[int]string{},
+		extraArgs: extraArgs,
 	}
 	if persistent {
 		root := t.TempDir()
@@ -103,7 +107,7 @@ func newProxiedCluster(t *testing.T, bin string, size, basePort int, persistent 
 
 func (c *proxiedCluster) launch(id int, addr string, logs *syncBuffer) *testNode {
 	c.t.Helper()
-	var extra []string
+	extra := append([]string(nil), c.extraArgs...)
 	if dir := c.dataDirs[id]; dir != "" {
 		extra = append(extra, "-data-dir="+dir)
 	}
@@ -277,6 +281,33 @@ func waitForConvergence(t *testing.T, nodes []*testNode, wantCommit int, timeout
 			t.Fatalf("nodes %v did not converge on %d identical committed entries within %v", ids(nodes), wantCommit, timeout)
 		}
 		time.Sleep(pollEvery)
+	}
+}
+
+// commandsOf returns the client commands in a node's log, in order. It
+// skips the no-op entries every new leader appends when it wins an
+// election (node/campaign.go): they carry no command, and how many there
+// are depends on how many elections happened, so tests compare commands,
+// not raw log positions.
+func commandsOf(st raftrpc.StatusReply) []string {
+	var out []string
+	for _, e := range st.Log {
+		if !e.IsNoOp() {
+			out = append(out, string(e.Command))
+		}
+	}
+	return out
+}
+
+// requireCommands fails the test unless every status holds exactly the
+// given client commands, in that order.
+func requireCommands(t *testing.T, statuses []raftrpc.StatusReply, want []string) {
+	t.Helper()
+	for _, st := range statuses {
+		got := commandsOf(st)
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("node %d holds commands %q, want %q (log %s)", st.ID, got, want, describeLog(st))
+		}
 	}
 }
 

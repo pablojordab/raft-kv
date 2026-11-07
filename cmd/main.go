@@ -34,6 +34,8 @@ func main() {
 	logFormat := flag.String("log-format", "text", "log output format: text (human-readable key=value) or json (one JSON object per line)")
 	logLevel := flag.String("log-level", "info", "minimum log level: debug, info, warn or error")
 	dataDir := flag.String("data-dir", "", "directory where this node saves its term, vote and log (one directory per node); empty = in memory only, nothing survives a restart")
+	testSaveDelay := flag.Duration("test-save-delay", 0, "TESTING ONLY: make every save to -data-dir take at least this long, to simulate a slow disk")
+	electionTimeout := flag.Duration("election-timeout", 0, "minimum election timeout (each one is random in [t, 2t)); 0 = default: 150ms in memory, 500ms with -data-dir")
 	flag.Parse()
 
 	// Configure the process-wide default logger BEFORE creating the node:
@@ -62,12 +64,13 @@ func main() {
 	// implementation of node.Transport.
 	transport := raftrpc.NewNetRPCTransport()
 	n := node.NewNode(*id, peers, transport)
+	n.SetElectionTimeout(chooseElectionTimeout(*electionTimeout, *dataDir != ""))
 
 	// Persistence must be set up BEFORE the node starts serving RPCs or
 	// running its election timer: first restore whatever it saved before
 	// it was last stopped, then start saving every change from here on.
 	if *dataDir != "" {
-		setUpPersistence(n, *dataDir, logger)
+		setUpPersistence(n, *dataDir, *testSaveDelay, logger)
 	} else {
 		logger.Warn("no -data-dir given: running in memory only; this node forgets its term, vote and log on restart")
 	}
@@ -149,13 +152,38 @@ func logStatePeriodically(ctx context.Context, n *node.Node, logger *slog.Logger
 	}
 }
 
+// persistentElectionTimeout is the default minimum election timeout for a
+// node that saves to disk. The Raft paper requires the election timeout to
+// be much longer than a round of RPCs, and with persistence every round
+// includes an fsync on each node, which takes well under a millisecond on
+// a fast Linux disk but can take hundreds of milliseconds on others (it
+// did on Windows). With the in-memory default of 150-300ms, such a disk
+// made followers time out against a healthy leader, and could even keep
+// elections from ever completing (TestSlowDiskCausesNoSpuriousElections).
+// 500-1000ms leaves room for that, at the cost of slower failure detection;
+// etcd makes the same trade-off, with a 1s default.
+const persistentElectionTimeout = 500 * time.Millisecond
+
+// chooseElectionTimeout returns the -election-timeout value if one was
+// given, and otherwise the default for this kind of node.
+func chooseElectionTimeout(flagValue time.Duration, persistent bool) time.Duration {
+	switch {
+	case flagValue > 0:
+		return flagValue
+	case persistent:
+		return persistentElectionTimeout
+	default:
+		return node.DefaultElectionTimeout
+	}
+}
+
 // setUpPersistence restores the node's saved state from dataDir, if there
 // is any, and makes it save every change there from now on. A state file
 // that exists but can't be read or fails validation stops the process:
 // starting over with an empty log could make this node vote twice in a
 // term or lose entries the cluster already committed, so a person should
 // look at the file instead.
-func setUpPersistence(n *node.Node, dataDir string, logger *slog.Logger) {
+func setUpPersistence(n *node.Node, dataDir string, saveDelay time.Duration, logger *slog.Logger) {
 	storage, err := node.NewFileStorage(dataDir)
 	if err != nil {
 		fatal(logger, "cannot use data directory", "dir", dataDir, "err", err)
@@ -171,7 +199,26 @@ func setUpPersistence(n *node.Node, dataDir string, logger *slog.Logger) {
 	} else {
 		logger.Info("no saved state found; starting fresh", "file", storage.Path())
 	}
+	if saveDelay > 0 {
+		logger.Warn("simulating a slow disk (testing only)", "saveDelay", saveDelay.String())
+		n.SetStorage(slowStorage{inner: storage, delay: saveDelay})
+		return
+	}
 	n.SetStorage(storage)
+}
+
+// slowStorage wraps a Storage and makes every Save take at least `delay`
+// longer, simulating a slow disk (-test-save-delay). It exists so tests can
+// reproduce on any machine what a slow fsync does to the cluster, as seen
+// on Windows, where saves can take hundreds of milliseconds.
+type slowStorage struct {
+	inner node.Storage
+	delay time.Duration
+}
+
+func (s slowStorage) Save(state node.PersistentState) error {
+	time.Sleep(s.delay)
+	return s.inner.Save(state)
 }
 
 // newLogger builds the process's logger from the -log-format and

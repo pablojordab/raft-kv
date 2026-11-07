@@ -142,8 +142,31 @@ func (n *Node) becomeLeaderLocked(ctx context.Context) {
 	n.volatile.NextIndex = nextIndex
 	n.volatile.MatchIndex = matchIndex
 
+	// Append a no-op entry from the new term (the Raft paper, section 8).
+	//
+	// Without it, entries left uncommitted by previous leaders can stay
+	// uncommitted indefinitely: by the Figure 8 rule (commit.go) a leader
+	// may only commit, by counting replicas, entries from its OWN term.
+	// Until a client happens to send a new command, nothing from the
+	// current term exists, so nothing earlier can commit either, and a
+	// client waiting on such an entry hangs. TestWholeClusterRestart
+	// caught exactly this on Windows: a leader change mid-write left the
+	// in-flight command uncommitted until the client gave up.
+	//
+	// With the no-op, the first replication round carries a current-term
+	// entry; once a majority has it, it and everything before it commit.
+	// NextIndex was set above to the no-op's index, so that round sends
+	// it. An empty Command is what marks an entry as a no-op (see
+	// LogEntry.IsNoOp); whatever applies committed commands must skip it.
 	term := n.persistent.CurrentTerm
-	n.logger.Info("became leader", "term", term, "lastLogIndex", lastLogIndex)
+	noop := LogEntry{Term: term, Index: lastLogIndex + 1}
+	n.persistent.Log = append(n.persistent.Log, noop)
+	n.persistLocked() // the leader counts itself as holding it (commit.go)
+
+	n.logger.Info("became leader", "term", term, "lastLogIndex", lastLogIndex, "noopIndex", noop.Index)
+
+	// A single-node cluster is its own majority: commit right away.
+	n.advanceCommitIndexLocked()
 
 	// A Leader must immediately start asserting itself with heartbeats
 	// (see heartbeat.go) — every other node is still running its own

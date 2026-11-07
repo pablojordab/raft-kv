@@ -6,21 +6,25 @@ import (
 	"time"
 )
 
-// electionTimeoutMin and electionTimeoutMax bound the randomized election
-// timeout, per the Raft paper's recommended range (section 5.6): broadcast
-// time << election timeout << mean time between failures. 150-300ms is
-// the range the original paper benchmarks against; it's generous for a
-// single-machine, localhost-RPC setup like this project's, where
-// broadcast time is sub-millisecond.
+// DefaultElectionTimeout is the default lower bound of the randomized
+// election timeout; each timeout is drawn from [min, 2*min). The Raft paper
+// (section 5.6) requires
 //
-// Randomizing within this range (rather than using one fixed timeout for
-// every node) is what makes split votes rare: if all followers timed out
-// at exactly the same instant, they'd all become candidates simultaneously
-// every single election, and no candidate would ever gather a majority.
-const (
-	electionTimeoutMin = 150 * time.Millisecond
-	electionTimeoutMax = 300 * time.Millisecond
-)
+//	broadcast time << election timeout << mean time between failures
+//
+// where broadcast time is how long a node takes to send RPCs to every
+// server and get their replies, INCLUDING writing to stable storage before
+// replying. 150-300ms is the range the paper benchmarks against. It is
+// right for an in-memory cluster on one machine, where broadcast time is
+// well under a millisecond, but too short when nodes persist to a slow
+// disk: see SetElectionTimeout, and cmd/main.go, which uses a longer
+// default whenever -data-dir is set.
+//
+// Randomizing the timeout (rather than giving every node the same one) is
+// what makes split votes rare: if all followers timed out at exactly the
+// same instant, they'd all become candidates at once in every election,
+// and no candidate would ever gather a majority.
+const DefaultElectionTimeout = 150 * time.Millisecond
 
 // electionTimerPollInterval is how often RunElectionTimer wakes up to
 // check whether the timeout has elapsed. It's unrelated to the election
@@ -30,13 +34,32 @@ const (
 // more than tight enough here.
 const electionTimerPollInterval = 10 * time.Millisecond
 
-// randomElectionTimeout returns a random duration in
-// [electionTimeoutMin, electionTimeoutMax), using the package-level math/rand
-// source. Not cryptographically random, and doesn't need to be — this is
-// scheduling jitter, not a security boundary.
-func randomElectionTimeout() time.Duration {
-	span := electionTimeoutMax - electionTimeoutMin
-	return electionTimeoutMin + time.Duration(rand.Int63n(int64(span)))
+// SetElectionTimeout sets the lower bound of this node's randomized
+// election timeout; each timeout is then drawn from [min, 2*min). Call it
+// before the node starts.
+//
+// The timeout has to be much longer than the slowest round of RPCs,
+// including each node's fsync before it replies. A vote, for example,
+// needs the candidate's save of its new term plus the voter's save of its
+// vote. If that takes longer than the candidate's timeout, the candidate
+// gives up and starts a new election before the votes for the previous one
+// arrive, and the cluster can go on electing forever without ever getting
+// a leader: TestSlowDiskCausesNoSpuriousElections reproduces exactly that
+// with 150ms saves and the in-memory default.
+func (n *Node) SetElectionTimeout(min time.Duration) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.electionTimeoutMin = min
+}
+
+// randomElectionTimeoutLocked returns a random duration in
+// [min, 2*min) for this node's configured minimum, using the
+// package-level math/rand source. Not cryptographically random, and
+// doesn't need to be: this is scheduling jitter, not a security boundary.
+// Must be called with n.mu held.
+func (n *Node) randomElectionTimeoutLocked() time.Duration {
+	min := n.electionTimeoutMin
+	return min + time.Duration(rand.Int63n(int64(min)))
 }
 
 // resetElectionTimer records "now" as the last time this node had a
@@ -88,7 +111,7 @@ func (n *Node) resetElectionTimerLocked() {
 // no channels, no race.
 func (n *Node) RunElectionTimer(ctx context.Context) {
 	n.mu.Lock()
-	timeout := randomElectionTimeout()
+	timeout := n.randomElectionTimeoutLocked()
 	termWatched := n.persistent.CurrentTerm
 	n.mu.Unlock()
 
@@ -115,7 +138,7 @@ func (n *Node) RunElectionTimer(ctx context.Context) {
 		// exiting — this IS the only timer this node will ever get, so
 		// nothing else is going to restart it.
 		if n.persistent.CurrentTerm != termWatched {
-			timeout = randomElectionTimeout()
+			timeout = n.randomElectionTimeoutLocked()
 			termWatched = n.persistent.CurrentTerm
 			n.logger.Debug("election timer resynced", "term", termWatched, "timeout", timeout.String())
 			n.mu.Unlock()
@@ -137,7 +160,7 @@ func (n *Node) RunElectionTimer(ctx context.Context) {
 			// becomeCandidateLocked just incremented CurrentTerm; adopt
 			// the new term's timeout immediately instead of waiting for
 			// the next tick to notice the mismatch above.
-			timeout = randomElectionTimeout()
+			timeout = n.randomElectionTimeoutLocked()
 			termWatched = n.persistent.CurrentTerm
 		}
 

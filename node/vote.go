@@ -20,6 +20,23 @@ func (n *Node) HandleRequestVote(candidateTerm, candidateID, candidateLastLogInd
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	// Whatever this request changes (a newer term adopted, a vote cast),
+	// it's saved ONCE, here, before the reply leaves: this deferred call
+	// runs before the unlock above and before the caller gets the return
+	// values, on every return path below, including the rejections. One
+	// fsync per request instead of one per change keeps votes fast on a
+	// slow disk. The election timer is reset after the save, so time spent
+	// writing to our own disk never counts as time without a leader.
+	dirty, granted := false, false
+	defer func() {
+		if dirty {
+			n.persistLocked()
+		}
+		if granted {
+			n.resetElectionTimerLocked()
+		}
+	}()
+
 	// "Rules for Servers" (Figure 2, applies to every RPC handler): if
 	// this request carries a newer term than ours, we're stale — step
 	// down to Follower and adopt the new term before doing anything
@@ -34,7 +51,7 @@ func (n *Node) HandleRequestVote(candidateTerm, candidateID, candidateLastLogInd
 	// just a rival candidate it will refuse below. See stepDownLocked in
 	// state.go.
 	if candidateTerm > n.persistent.CurrentTerm {
-		n.stepDownLocked(candidateTerm)
+		dirty = n.becomeFollowerLocked(candidateTerm)
 	}
 
 	// Case 1: the candidate's term is stale (older than ours, even after
@@ -74,12 +91,12 @@ func (n *Node) HandleRequestVote(candidateTerm, candidateID, candidateLastLogInd
 	// All checks passed: grant the vote.
 	n.persistent.VotedFor = candidateID
 
-	// The vote must be on disk before the "yes" reply leaves. If this
-	// node granted a vote, crashed, and restarted without remembering
-	// it, it could vote for a second candidate in the same term, and two
-	// leaders could be elected in one term — exactly what Raft's
-	// one-vote-per-term rule exists to prevent.
-	n.persistLocked()
+	// The vote must be on disk before the "yes" reply leaves (the deferred
+	// save above guarantees it). If this node granted a vote, crashed, and
+	// restarted without remembering it, it could vote for a second
+	// candidate in the same term, and two leaders could be elected in one
+	// term — exactly what Raft's one-vote-per-term rule exists to prevent.
+	dirty = true
 	n.logger.Debug("granted vote", "term", n.persistent.CurrentTerm, "candidate", candidateID)
 
 	// Per the Raft paper's companion "Students' Guide to Raft": reset
@@ -88,7 +105,8 @@ func (n *Node) HandleRequestVote(candidateTerm, candidateID, candidateLastLogInd
 	// node that's been partitioned off (and is stuck retrying stale,
 	// never-to-be-granted RequestVotes) keep interrupting a healthy
 	// cluster's elections just by sending RPCs nobody should vote for.
-	n.resetElectionTimerLocked()
+	// (The reset itself happens in the deferred function, after the save.)
+	granted = true
 
 	return n.persistent.CurrentTerm, true
 }

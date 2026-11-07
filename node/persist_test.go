@@ -122,7 +122,7 @@ func TestPersist_EveryStateChangeIsSavedBeforeReturning(t *testing.T) {
 		n.becomeCandidateLocked(context.Background())
 		n.mu.Unlock()
 	})
-	step("become leader (no persistent change)", false, func() {
+	step("become leader (appends and saves a no-op entry)", true, func() {
 		n.mu.Lock()
 		n.becomeLeaderLocked(t.Context())
 		n.mu.Unlock()
@@ -176,5 +176,40 @@ func TestPersist_NoStorageMeansInMemoryOnly(t *testing.T) {
 	n := NewNode(1, map[int]string{2: "n2"}, nil)
 	if _, granted := n.HandleRequestVote(1, 2, 0, 0); !granted {
 		t.Fatal("a node without storage should still work in memory")
+	}
+}
+
+// A request that changes several pieces of persistent state must still
+// cost exactly ONE save: adopting a newer term and granting a vote (or
+// appending entries) in the same request are written together. Two fsyncs
+// per request would double how long votes and replication take on a slow
+// disk; see SetElectionTimeout for why that can stop elections from ever
+// completing.
+func TestPersist_OneSavePerRequestEvenWhenSeveralThingsChange(t *testing.T) {
+	store := &memStorage{}
+	n := NewNode(1, map[int]string{2: "n2", 3: "n3"}, nil)
+	n.SetStorage(store)
+
+	// Newer term AND a granted vote.
+	if _, granted := n.HandleRequestVote(4, 2, 0, 0); !granted {
+		t.Fatal("expected the vote")
+	}
+	if got := len(store.saves); got != 1 {
+		t.Fatalf("adopting a term and voting took %d saves, want 1", got)
+	}
+
+	// Newer term AND new entries, from a leader of term 6.
+	n.HandleAppendEntries(6, 3, 0, 0, []LogEntry{{Term: 6, Command: []byte("a")}}, 0)
+	if got := len(store.saves); got != 2 {
+		t.Fatalf("adopting a term and appending took %d saves in total, want 2 (one per request)", got)
+	}
+	if last, _ := store.last(); last.CurrentTerm != 6 || len(last.Log) != 1 {
+		t.Fatalf("the single save missed part of the change: %+v", last)
+	}
+
+	// A newer term in a REJECTED request is still saved before replying.
+	n.HandleRequestVote(9, 2, 0, 0) // candidate's log is behind ours: refused
+	if last, _ := store.last(); last.CurrentTerm != 9 {
+		t.Fatalf("a refused request's newer term was not saved: last save %+v", last)
 	}
 }

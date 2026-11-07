@@ -58,17 +58,18 @@ func TestFollowerCrashAndRecovery(t *testing.T) {
 	}()
 
 	// Crash the follower after 5 writes, bring it back after 12.
-	count := 0
-	for range committed {
+	count, lastIndex := 0, 0
+	for index := range committed {
 		count++
+		lastIndex = index
 		switch count {
 		case 5:
 			follower.kill()
 			t.Logf("killed follower node %d after %d committed writes", follower.id, count)
 		case 12:
 			down := fetchStatus(t, leader)
-			if down.CommitIndex < 12 {
-				t.Fatalf("writes should have kept committing without the follower; leader commit=%d", down.CommitIndex)
+			if down.CommitIndex < lastIndex {
+				t.Fatalf("writes should have kept committing without the follower; leader commit=%d, want >= %d", down.CommitIndex, lastIndex)
 			}
 			follower = c.restart(follower.id)
 			t.Logf("restarted node %d (empty log) after %d committed writes", follower.id, count)
@@ -79,32 +80,30 @@ func TestFollowerCrashAndRecovery(t *testing.T) {
 		t.Fatal(writerErr)
 	}
 
-	statuses := waitForConvergence(t, c.nodes, total, 5*time.Second)
-	for _, st := range statuses {
-		for i, e := range st.Log {
-			if want := fmt.Sprintf("SET k%d v%d", i+1, i+1); string(e.Command) != want {
-				t.Fatalf("node %d entry %d = %q, want %q", st.ID, i+1, e.Command, want)
-			}
-		}
+	statuses := waitForConvergence(t, c.nodes, lastIndex, 5*time.Second)
+	var want []string
+	for i := 1; i <= total; i++ {
+		want = append(want, fmt.Sprintf("SET k%d v%d", i, i))
 	}
+	requireCommands(t, statuses, want)
 	t.Logf("restarted follower caught up: all 3 nodes hold the same %d committed entries", total)
 }
 
 // partitionLeaderAway runs the shared first half of the partition tests:
 // commit two writes on a healthy 3-node cluster, then cut the leader off
-// from the other two. Returns the old leader, its term, and the two nodes
-// on the majority side.
-func partitionLeaderAway(t *testing.T, c *proxiedCluster) (*testNode, int, []*testNode) {
+// from the other two. Returns the old leader, its term, the two nodes on
+// the majority side, and the log index of the last pre-partition write.
+func partitionLeaderAway(t *testing.T, c *proxiedCluster) (*testNode, int, []*testNode, int) {
 	t.Helper()
 	oldLeader, oldTerm := waitForStableLeader(t, c.nodes)
 	mustCommit(t, c.nodes, "SET before1 x")
-	mustCommit(t, c.nodes, "SET before2 x")
-	waitForConvergence(t, c.nodes, 2, 3*time.Second)
+	beforeIndex := mustCommit(t, c.nodes, "SET before2 x")
+	waitForConvergence(t, c.nodes, beforeIndex, 3*time.Second)
 
 	majority := others(c.nodes, oldLeader.id)
 	c.partition([]int{oldLeader.id}, ids(majority))
 	t.Logf("partitioned leader node %d (term %d) away from nodes %v", oldLeader.id, oldTerm, ids(majority))
-	return oldLeader, oldTerm, majority
+	return oldLeader, oldTerm, majority, beforeIndex
 }
 
 // TestPartitionedLeaderReplaced: the leader is cut off from the other two
@@ -116,7 +115,7 @@ func TestPartitionedLeaderReplaced(t *testing.T) {
 		t.Skip("process-level test")
 	}
 	c := startProxiedCluster(t, buildNodeBinary(t), 3, partitionBasePort)
-	oldLeader, oldTerm, majority := partitionLeaderAway(t, c)
+	oldLeader, oldTerm, majority, beforeIndex := partitionLeaderAway(t, c)
 
 	newLeader, newTerm := waitForStableLeader(t, majority)
 	t.Logf("majority side elected node %d in term %d", newLeader.id, newTerm)
@@ -140,8 +139,9 @@ func TestPartitionedLeaderReplaced(t *testing.T) {
 	}
 	st := fetchStatus(t, oldLeader)
 	t.Logf("isolated old leader: state=%s term=%d commit=%d (could not commit, as required)", st.State, st.Term, st.CommitIndex)
-	if st.CommitIndex != 2 {
-		t.Fatalf("isolated old leader's commit index moved to %d; only the 2 pre-partition writes may be committed", st.CommitIndex)
+	if st.CommitIndex != beforeIndex {
+		t.Fatalf("isolated old leader's commit index moved to %d; only the pre-partition writes (up to index %d) may be committed",
+			st.CommitIndex, beforeIndex)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestPartitionHealOldLeaderStepsDown(t *testing.T) {
 		t.Skip("process-level test")
 	}
 	c := startProxiedCluster(t, buildNodeBinary(t), 3, healBasePort)
-	oldLeader, oldTerm, majority := partitionLeaderAway(t, c)
+	oldLeader, oldTerm, majority, _ := partitionLeaderAway(t, c)
 
 	// While isolated, the old leader stores a write it can't commit.
 	stale := make(chan raftrpc.SubmitReply, 1)
@@ -165,8 +165,9 @@ func TestPartitionHealOldLeaderStepsDown(t *testing.T) {
 	}()
 
 	newLeader, newTerm := waitForStableLeader(t, majority)
+	lastIndex := 0
 	for i := 1; i <= 3; i++ {
-		mustCommit(t, majority, fmt.Sprintf("SET during%d x", i))
+		lastIndex = mustCommit(t, majority, fmt.Sprintf("SET during%d x", i))
 	}
 	if r := <-stale; r.Committed {
 		t.Fatal("the isolated old leader reported its write as committed")
@@ -178,17 +179,10 @@ func TestPartitionHealOldLeaderStepsDown(t *testing.T) {
 	c.heal()
 	t.Logf("healed the partition (new leader: node %d, term %d)", newLeader.id, newTerm)
 
-	statuses := waitForConvergence(t, c.nodes, 5, 5*time.Second)
-	want := []string{"SET before1 x", "SET before2 x", "SET during1 x", "SET during2 x", "SET during3 x"}
+	statuses := waitForConvergence(t, c.nodes, lastIndex, 5*time.Second)
+	// The stale write must be gone everywhere; only these remain.
+	requireCommands(t, statuses, []string{"SET before1 x", "SET before2 x", "SET during1 x", "SET during2 x", "SET during3 x"})
 	for _, st := range statuses {
-		if len(st.Log) != len(want) {
-			t.Fatalf("node %d log = %s, want exactly %v", st.ID, describeLog(st), want)
-		}
-		for i, e := range st.Log {
-			if string(e.Command) != want[i] {
-				t.Fatalf("node %d entry %d = %q, want %q (log %s)", st.ID, i+1, e.Command, want[i], describeLog(st))
-			}
-		}
 		if st.ID == oldLeader.id {
 			if st.State != "Follower" || st.Term <= oldTerm {
 				t.Fatalf("old leader should have stepped down: state=%s term=%d", st.State, st.Term)
@@ -222,10 +216,11 @@ func TestFiveNodesSurviveTwoFailures(t *testing.T) {
 	newLeader, newTerm := waitForStableLeader(t, survivors)
 	t.Logf("3 survivors %v elected node %d in term %d", ids(survivors), newLeader.id, newTerm)
 
+	lastIndex := 0
 	for i := 1; i <= 5; i++ {
-		mustCommit(t, survivors, fmt.Sprintf("SET after%d x", i))
+		lastIndex = mustCommit(t, survivors, fmt.Sprintf("SET after%d x", i))
 	}
-	waitForConvergence(t, survivors, 8, 5*time.Second)
+	waitForConvergence(t, survivors, lastIndex, 5*time.Second)
 	t.Logf("3 of 5 nodes kept serving writes: all survivors hold the same 8 committed entries")
 
 	// A third failure leaves 2 of 5: no majority, so nothing may commit.

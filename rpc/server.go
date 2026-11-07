@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"errors"
 	"time"
 
 	"github.com/pablojordab/raft-kv/node"
@@ -69,6 +70,11 @@ const submitCommitTimeout = 2 * time.Second
 // is committed (Committed=true) or the wait times out (Committed=false,
 // outcome unknown — see node.WaitForCommit).
 func (s *RaftServer) Submit(args *SubmitArgs, reply *SubmitReply) error {
+	// An empty command is how the log marks a no-op entry (see
+	// node.LogEntry.IsNoOp), so a client may never submit one.
+	if len(args.Command) == 0 {
+		return errors.New("empty command: empty log entries are reserved for leader no-ops")
+	}
 	index, term, isLeader := s.node.Submit(args.Command)
 	reply.IsLeader = isLeader
 	reply.LeaderID = s.node.LeaderID()

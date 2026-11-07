@@ -46,10 +46,20 @@ type LogEntry struct {
 	// sentinel used before the first real entry).
 	Index int
 	// Command is the opaque payload the client wants applied to the
-	// state machine once this entry is committed. Left as []byte for
-	// now; Bloque 6 (the KV layer) will define how it's interpreted.
+	// state machine once this entry is committed. Raft itself never
+	// interprets it; a layer on top (e.g. a key-value store) defines
+	// what it means. An EMPTY Command marks a no-op entry (see IsNoOp).
 	Command []byte
 }
+
+// IsNoOp reports whether this entry is a no-op: the empty entry every new
+// leader appends when it wins an election (see becomeLeaderLocked in
+// campaign.go), which exists only so the leader can commit entries left
+// over from earlier terms. It carries no command, so whatever applies
+// committed entries to a state machine must skip it. Client commands are
+// never empty (the Submit RPC rejects empty ones), so the two can't be
+// confused.
+func (e LogEntry) IsNoOp() bool { return len(e.Command) == 0 }
 
 // PersistentState holds the fields that MUST be written to stable storage
 // before a node responds to any RPC, as required by the Raft paper (Figure

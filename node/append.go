@@ -29,24 +29,44 @@ func (n *Node) HandleAppendEntries(leaderTerm, leaderID, prevLogIndex, prevLogTe
 		return AppendEntriesResult{Term: n.persistent.CurrentTerm}
 	}
 
-	// leaderTerm >= our term: this sender IS the leader for that term.
-	// Adopt its term if it's newer, and in every case become (or stay) a
-	// Follower — a Candidate competing in this term has already lost.
-	// stepDownLocked (state.go) implements exactly that rule.
-	n.stepDownLocked(leaderTerm)
+	// From here on, the sender is the legitimate leader of its term, and
+	// this deferred function runs on every return path below (before the
+	// unlock, and before the reply leaves):
+	//
+	//   - it saves whatever this request changed (a newer term adopted,
+	//     entries appended or truncated) ONCE, instead of one fsync per
+	//     change, so a reply is as fast as a single write allows; and
+	//
+	//   - it then resets the election timer. Hearing from the current
+	//     leader postpones our own election, and doing the reset AFTER the
+	//     save means time spent writing to our own (possibly slow) disk
+	//     never counts as time without a leader. Before this, a slow fsync
+	//     on a follower could make it start an election against a healthy
+	//     leader (found on Windows, reproduced by
+	//     TestSlowDiskCausesNoSpuriousElections).
+	//
+	// The reset also applies when the consistency check below fails, on
+	// purpose: our log being behind doesn't make the sender any less the
+	// leader. It will keep retrying with earlier entries until our logs
+	// agree, and starting an election meanwhile would needlessly depose a
+	// healthy leader.
+	dirty := false
+	defer func() {
+		if dirty {
+			n.persistLocked()
+		}
+		n.resetElectionTimerLocked()
+	}()
+
+	// Adopt the leader's term if it's newer, and in every case become (or
+	// stay) a Follower: a Candidate competing in this term has already
+	// lost. becomeFollowerLocked (state.go) implements exactly that rule,
+	// leaving the save to the deferred function above.
+	dirty = n.becomeFollowerLocked(leaderTerm)
 
 	// Remember who the leader is, so clients that contact us can be
 	// redirected to it (Submit in rpc/server.go).
 	n.leaderID = leaderID
-
-	// Hearing from the current leader postpones our own election
-	// timeout. This happens BEFORE the log-consistency check below on
-	// purpose: even if our log doesn't match yet (rule 2 fails), the
-	// sender is still the legitimate leader, and it will keep retrying
-	// with earlier entries until our logs agree. Starting an election
-	// just because our log is behind would needlessly depose a healthy
-	// leader.
-	n.resetElectionTimerLocked()
 
 	// Rule 2: reply false if our log doesn't contain an entry at
 	// prevLogIndex whose term matches prevLogTerm. This is the core of
@@ -111,14 +131,14 @@ func (n *Node) HandleAppendEntries(leaderTerm, leaderID, prevLogIndex, prevLogTe
 		break
 	}
 
-	// The new entries must be on disk before we reply success: that reply
-	// lets the leader count us toward a majority and commit them. If we
-	// replied first and then crashed, the leader could consider an entry
-	// committed that a majority doesn't actually hold. A heartbeat or a
-	// re-sent RPC whose entries we already had changes nothing, so it
-	// costs no disk write.
+	// The new entries must be on disk before we reply success (the
+	// deferred save guarantees it): that reply lets the leader count us
+	// toward a majority and commit them. If we replied first and then
+	// crashed, the leader could consider an entry committed that a
+	// majority doesn't actually hold. A heartbeat or a re-sent RPC whose
+	// entries we already had changes nothing, so it costs no disk write.
 	if logChanged {
-		n.persistLocked()
+		dirty = true
 	}
 
 	// Rule 5: if leaderCommit > commitIndex, set

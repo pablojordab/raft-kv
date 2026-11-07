@@ -33,37 +33,39 @@ func TestReplicationTenCommands(t *testing.T) {
 	t.Logf("leader: node %d in term %d", leader.id, term)
 
 	// 1. Send 10 commands, one at a time, through the CLI. Each must be
-	// confirmed as committed, at the next index in order.
+	// confirmed as committed, at a later index than the one before it.
+	// (Not necessarily index 1, 2, 3...: the leader's no-op entry from
+	// winning its election comes first; see node/campaign.go.)
 	const numCommands = 10
 	sent := make([]string, numCommands)
+	lastIndex := 0
 	for i := 0; i < numCommands; i++ {
 		key, value := fmt.Sprintf("key%d", i+1), fmt.Sprintf("value%d", i+1)
 		sent[i] = "SET " + key + " " + value
 
 		index, out := runClient(t, clientBin, clusterFlag(nodes), "SET", key, value)
-		if index != i+1 {
-			t.Fatalf("command %d committed at index %d, want %d\nclient output:\n%s", i+1, index, i+1, out)
+		if index <= lastIndex {
+			t.Fatalf("command %d committed at index %d, not after the previous one (%d)\nclient output:\n%s",
+				i+1, index, lastIndex, out)
 		}
+		lastIndex = index
 	}
 
 	// 2. Followers learn the final commit index on the leader's next
-	// round, so poll briefly until every node reports all 10 committed.
-	statuses := waitForAllCommitted(t, nodes, numCommands)
+	// round, so poll briefly until every node reports it committed.
+	statuses := waitForAllCommitted(t, nodes, lastIndex)
 
-	// 3. Every node's log must match exactly what was sent, in order.
+	// 3. Every node's log must hold exactly the commands sent, in order,
+	// at consistent positions, all from the leader's term (one leader
+	// for the whole test, so its no-op is from that term too).
+	requireCommands(t, statuses, sent)
 	for _, st := range statuses {
-		if len(st.Log) != numCommands {
-			t.Fatalf("node %d has %d log entries, want %d", st.ID, len(st.Log), numCommands)
-		}
 		for i, entry := range st.Log {
 			if entry.Index != i+1 {
 				t.Errorf("node %d: entry %d has Index %d", st.ID, i+1, entry.Index)
 			}
 			if entry.Term != term {
 				t.Errorf("node %d: entry %d has term %d, want leader's term %d", st.ID, i+1, entry.Term, term)
-			}
-			if got := string(entry.Command); got != sent[i] {
-				t.Errorf("node %d: entry %d is %q, want %q", st.ID, i+1, got, sent[i])
 			}
 		}
 	}

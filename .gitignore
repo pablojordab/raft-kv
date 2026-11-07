@@ -1,0 +1,33 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Build output
+/bin/
+/dist/
+
+# Persisted Raft state written by -data-dir. The README's examples use
+# data/nodeN; the file names also cover a -data-dir anywhere else.
+/data/
+raft-state.json
+raft-state.json.tmp
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

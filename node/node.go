@@ -73,6 +73,10 @@ type Node struct {
 	// before the node starts.
 	storage Storage
 
+	// electionTimeoutMin is the lower bound of this node's randomized
+	// election timeout (see SetElectionTimeout in election.go).
+	electionTimeoutMin time.Duration
+
 	// onPersistError is called if saving to storage fails. The default
 	// (see NewNode) stops the process: a node that can't record its vote
 	// or log can't safely keep taking part in the cluster. Tests replace
@@ -116,6 +120,7 @@ func NewNode(id int, peers map[int]string, transport Transport) *Node {
 		// election, same as if it had just heard from a leader.
 		electionResetEvent: time.Now(),
 		leaderID:           -1, // no leader known yet
+		electionTimeoutMin: DefaultElectionTimeout,
 		logger:             slog.Default().With("node", id),
 	}
 	n.onPersistError = func(err error) {
