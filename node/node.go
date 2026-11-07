@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -66,6 +67,17 @@ type Node struct {
 	// created, so cmd/main.go chooses the format and level for the whole
 	// process just by setting the default logger first.
 	logger *slog.Logger
+
+	// storage is where persistent state is saved (storage.go). nil means
+	// in-memory only: nothing survives a restart. Set it with SetStorage
+	// before the node starts.
+	storage Storage
+
+	// onPersistError is called if saving to storage fails. The default
+	// (see NewNode) stops the process: a node that can't record its vote
+	// or log can't safely keep taking part in the cluster. Tests replace
+	// it to observe the failure instead.
+	onPersistError func(error)
 }
 
 // NewNode constructs a Node in the initial state every Raft server starts
@@ -81,7 +93,7 @@ type Node struct {
 // production, or a fake in tests) — see transport.go for why it's taken as
 // an interface here instead of a concrete rpc-package type.
 func NewNode(id int, peers map[int]string, transport Transport) *Node {
-	return &Node{
+	n := &Node{
 		id:        id,
 		peers:     peers,
 		transport: transport,
@@ -106,6 +118,20 @@ func NewNode(id int, peers map[int]string, transport Transport) *Node {
 		leaderID:           -1, // no leader known yet
 		logger:             slog.Default().With("node", id),
 	}
+	n.onPersistError = func(err error) {
+		n.logger.Error("cannot persist state; stopping", "err", err)
+		panic(fmt.Sprintf("node %d: cannot persist Raft state: %v", id, err))
+	}
+	return n
+}
+
+// SetStorage makes the node save its persistent state to s from now on.
+// Call it before starting the node (before RunElectionTimer and before
+// serving RPCs), so no state change can happen unsaved.
+func (n *Node) SetStorage(s Storage) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.storage = s
 }
 
 // ID returns this node's own identifier. Safe to call without holding a

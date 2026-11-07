@@ -161,6 +161,12 @@ func (n *Node) becomeCandidateLocked(ctx context.Context) {
 	n.leaderID = -1              // new term: no leader known for it yet
 	n.electionResetEvent = time.Now()
 
+	// Save the new term and the vote for ourselves BEFORE asking anyone
+	// for a vote. Otherwise a crash right after the RequestVotes go out
+	// could bring this node back in the old term, unaware it already
+	// campaigned (and voted) in the new one.
+	n.persistLocked()
+
 	term := n.persistent.CurrentTerm
 	n.logger.Info("became candidate", "term", term, "reason", "election timeout")
 

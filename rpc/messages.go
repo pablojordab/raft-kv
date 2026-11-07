@@ -81,6 +81,7 @@ type StatusReply struct {
 	ID          int
 	State       string // "Follower", "Candidate" or "Leader"
 	Term        int
+	VotedFor    int
 	LeaderID    int
 	CommitIndex int
 	LastApplied int

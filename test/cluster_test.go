@@ -138,11 +138,13 @@ func startCluster(t *testing.T, bin string, size, basePort int) []*testNode {
 // level into logs. JSON makes every log line a structured event the tests
 // can parse (logevents_test.go); debug level makes sure the timeline
 // printed when a test fails includes every vote, rejection and commit.
-func startNodeProcess(t *testing.T, bin string, id int, addr, peers string, logs *syncBuffer) *exec.Cmd {
+func startNodeProcess(t *testing.T, bin string, id int, addr, peers string, logs *syncBuffer, extraArgs ...string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command(bin,
-		"-id="+strconv.Itoa(id), "-addr="+addr, "-peers="+peers,
-		"-log-format=json", "-log-level=debug")
+	args := append([]string{
+		"-id=" + strconv.Itoa(id), "-addr=" + addr, "-peers=" + peers,
+		"-log-format=json", "-log-level=debug",
+	}, extraArgs...)
+	cmd := exec.Command(bin, args...)
 	cmd.Stdout = logs
 	cmd.Stderr = logs // slog writes to stderr
 	if err := cmd.Start(); err != nil {

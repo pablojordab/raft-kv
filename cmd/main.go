@@ -33,6 +33,7 @@ func main() {
 	peersFlag := flag.String("peers", "", "comma-separated peerID=address pairs, e.g. 2=127.0.0.1:9002,3=127.0.0.1:9003")
 	logFormat := flag.String("log-format", "text", "log output format: text (human-readable key=value) or json (one JSON object per line)")
 	logLevel := flag.String("log-level", "info", "minimum log level: debug, info, warn or error")
+	dataDir := flag.String("data-dir", "", "directory where this node saves its term, vote and log (one directory per node); empty = in memory only, nothing survives a restart")
 	flag.Parse()
 
 	// Configure the process-wide default logger BEFORE creating the node:
@@ -61,6 +62,15 @@ func main() {
 	// implementation of node.Transport.
 	transport := raftrpc.NewNetRPCTransport()
 	n := node.NewNode(*id, peers, transport)
+
+	// Persistence must be set up BEFORE the node starts serving RPCs or
+	// running its election timer: first restore whatever it saved before
+	// it was last stopped, then start saving every change from here on.
+	if *dataDir != "" {
+		setUpPersistence(n, *dataDir, logger)
+	} else {
+		logger.Warn("no -data-dir given: running in memory only; this node forgets its term, vote and log on restart")
+	}
 
 	// RaftServer (rpc/server.go) is the receiving side: it's what every
 	// OTHER node's NetRPCTransport will be calling into, over the
@@ -137,6 +147,31 @@ func logStatePeriodically(ctx context.Context, n *node.Node, logger *slog.Logger
 				"log", len(st.Log), "commit", st.CommitIndex, "leader", st.LeaderID)
 		}
 	}
+}
+
+// setUpPersistence restores the node's saved state from dataDir, if there
+// is any, and makes it save every change there from now on. A state file
+// that exists but can't be read or fails validation stops the process:
+// starting over with an empty log could make this node vote twice in a
+// term or lose entries the cluster already committed, so a person should
+// look at the file instead.
+func setUpPersistence(n *node.Node, dataDir string, logger *slog.Logger) {
+	storage, err := node.NewFileStorage(dataDir)
+	if err != nil {
+		fatal(logger, "cannot use data directory", "dir", dataDir, "err", err)
+	}
+	state, found, err := storage.Load()
+	if err != nil {
+		fatal(logger, "cannot load saved state; refusing to start", "err", err)
+	}
+	if found {
+		if err := n.RestorePersistentState(state); err != nil {
+			fatal(logger, "cannot restore saved state; refusing to start", "err", err)
+		}
+	} else {
+		logger.Info("no saved state found; starting fresh", "file", storage.Path())
+	}
+	n.SetStorage(storage)
 }
 
 // newLogger builds the process's logger from the -log-format and

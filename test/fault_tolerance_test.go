@@ -19,9 +19,11 @@ import (
 // nodes are still a majority, so every write must keep committing. Once it
 // returns, it must catch up to exactly the same log as everyone else.
 //
-// Since persistence isn't implemented yet, the follower restarts with an
-// empty log, so "catching up" means receiving the whole log again through
-// the leader's normal conflict backtracking (heartbeat.go).
+// This cluster deliberately runs WITHOUT -data-dir, so the follower
+// restarts with an empty log, like a replacement machine with a blank
+// disk. "Catching up" then means receiving the whole log again through
+// the leader's conflict backtracking (heartbeat.go). Recovery from the
+// node's own disk is covered by persistence_test.go.
 func TestFollowerCrashAndRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("process-level test")

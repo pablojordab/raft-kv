@@ -33,7 +33,8 @@ func (n *Node) stepDownLocked(newTerm int) {
 	if newTerm > n.persistent.CurrentTerm {
 		n.persistent.CurrentTerm = newTerm
 		n.persistent.VotedFor = -1
-		n.leaderID = -1 // whoever led the old term doesn't lead this one
+		n.leaderID = -1   // whoever led the old term doesn't lead this one
+		n.persistLocked() // new term and cleared vote must be durable
 	}
 	n.state = Follower
 	n.volatile.NextIndex = nil
@@ -131,6 +132,7 @@ type Status struct {
 	ID          int
 	State       NodeState
 	Term        int
+	VotedFor    int
 	LeaderID    int
 	CommitIndex int
 	LastApplied int
@@ -148,6 +150,7 @@ func (n *Node) Status() Status {
 		ID:          n.id,
 		State:       n.state,
 		Term:        n.persistent.CurrentTerm,
+		VotedFor:    n.persistent.VotedFor,
 		LeaderID:    n.leaderID,
 		CommitIndex: n.volatile.CommitIndex,
 		LastApplied: n.volatile.LastApplied,
@@ -170,4 +173,63 @@ func (n *Node) LogLength() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return len(n.persistent.Log)
+}
+
+// persistLocked saves the persistent state (term, vote, log) to storage,
+// if the node has one. Every code path that changes any of those three
+// fields calls it right after the change and BEFORE releasing the lock, so
+// the new state is durable before anything can act on it: before an RPC
+// reply leaves (a granted vote, an accepted entry), and before an outgoing
+// RPC that depends on it (a candidate's RequestVote for its new term).
+// That's the Raft paper's Figure 2 rule: "updated on stable storage before
+// responding to RPCs".
+//
+// It calls Save while holding n.mu, so the node is blocked for the
+// duration of the disk write (an fsync, typically a few milliseconds).
+// That's the simple, obviously-correct choice: the reply has to wait for
+// the write anyway, and nothing else can observe a state that isn't saved
+// yet.
+//
+// If saving fails, onPersistError is called (by default it stops the
+// process); see NewNode.
+//
+// Must be called with n.mu held.
+func (n *Node) persistLocked() {
+	if n.storage == nil {
+		return
+	}
+	if err := n.storage.Save(n.persistent); err != nil {
+		n.onPersistError(err)
+	}
+}
+
+// RestorePersistentState loads previously saved state into a node that
+// hasn't started yet: after a restart, the node continues with the term,
+// vote and log it had saved, instead of starting over from term 0 with an
+// empty log. Call it after NewNode and before SetStorage, RunElectionTimer
+// or serving RPCs.
+//
+// Only the persistent state comes back. The node still starts as a
+// Follower that knows no leader, with CommitIndex 0: commitIndex is
+// volatile in the Raft paper because it can always be relearned, here from
+// the next leader's leaderCommit.
+//
+// Returns an error, changing nothing, if the state fails the same checks
+// FileStorage.Load applies (see validatePersistentState).
+func (n *Node) RestorePersistentState(s PersistentState) error {
+	if err := validatePersistentState(s); err != nil {
+		return err
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.persistent = PersistentState{
+		CurrentTerm: s.CurrentTerm,
+		VotedFor:    s.VotedFor,
+		Log:         append([]LogEntry(nil), s.Log...), // our own copy
+	}
+	lastIndex, lastTerm := n.lastLogIndexAndTermLocked()
+	n.logger.Info("restored state", "term", s.CurrentTerm, "votedFor", s.VotedFor,
+		"logLength", len(s.Log), "lastLogIndex", lastIndex, "lastLogTerm", lastTerm)
+	return nil
 }

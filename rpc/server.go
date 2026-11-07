@@ -89,6 +89,7 @@ func (s *RaftServer) Status(args *StatusArgs, reply *StatusReply) error {
 	reply.ID = st.ID
 	reply.State = st.State.String()
 	reply.Term = st.Term
+	reply.VotedFor = st.VotedFor
 	reply.LeaderID = st.LeaderID
 	reply.CommitIndex = st.CommitIndex
 	reply.LastApplied = st.LastApplied

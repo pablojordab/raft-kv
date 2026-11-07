@@ -85,6 +85,7 @@ func (n *Node) HandleAppendEntries(leaderTerm, leaderID, prevLogIndex, prevLogTe
 	// already gave us entries 2-5. Truncating on that old RPC would throw
 	// away entries 4-5, which may already be committed. Only an actual
 	// term conflict justifies deleting anything.
+	logChanged := false
 	for i, entry := range entries {
 		index := prevLogIndex + 1 + i // position this entry belongs at (1-indexed)
 
@@ -94,6 +95,7 @@ func (n *Node) HandleAppendEntries(leaderTerm, leaderID, prevLogIndex, prevLogTe
 			}
 			// Conflict: drop this entry and everything after it.
 			n.persistent.Log = n.persistent.Log[:index-1]
+			logChanged = true
 		}
 
 		// From here on we're at the end of our log: append the rest.
@@ -104,8 +106,19 @@ func (n *Node) HandleAppendEntries(leaderTerm, leaderID, prevLogIndex, prevLogTe
 			// (state.go) holds no matter what the sender put there.
 			e.Index = prevLogIndex + 1 + j
 			n.persistent.Log = append(n.persistent.Log, e)
+			logChanged = true
 		}
 		break
+	}
+
+	// The new entries must be on disk before we reply success: that reply
+	// lets the leader count us toward a majority and commit them. If we
+	// replied first and then crashed, the leader could consider an entry
+	// committed that a majority doesn't actually hold. A heartbeat or a
+	// re-sent RPC whose entries we already had changes nothing, so it
+	// costs no disk write.
+	if logChanged {
+		n.persistLocked()
 	}
 
 	// Rule 5: if leaderCommit > commitIndex, set

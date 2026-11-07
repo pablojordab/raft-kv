@@ -2,6 +2,7 @@ package test
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,6 +18,8 @@ const (
 	partitionBasePort     = 9500
 	healBasePort          = 9600
 	fiveNodeBasePort      = 9700
+	restartBasePort       = 9800
+	fullRestartBasePort   = 9900
 )
 
 // proxiedCluster is a cluster whose nodes reach each other only through
@@ -33,14 +36,39 @@ type proxiedCluster struct {
 	// peersFlag[id] is the -peers value node id was started with (its
 	// outgoing links), reused if the node is restarted.
 	peersFlag map[int]string
+	// dataDirs[id] is node id's -data-dir, or empty if the cluster runs
+	// in memory only. A restarted node reuses the same directory.
+	dataDirs map[int]string
 }
 
+// startProxiedCluster starts an in-memory cluster: a restarted node comes
+// back with an empty log and term 0.
 func startProxiedCluster(t *testing.T, bin string, size, basePort int) *proxiedCluster {
+	t.Helper()
+	return newProxiedCluster(t, bin, size, basePort, false)
+}
+
+// startPersistentProxiedCluster starts a cluster whose nodes save their
+// state to disk (-data-dir, one temp directory per node), so a restarted
+// node comes back with the term, vote and log it had saved.
+func startPersistentProxiedCluster(t *testing.T, bin string, size, basePort int) *proxiedCluster {
+	t.Helper()
+	return newProxiedCluster(t, bin, size, basePort, true)
+}
+
+func newProxiedCluster(t *testing.T, bin string, size, basePort int, persistent bool) *proxiedCluster {
 	t.Helper()
 	c := &proxiedCluster{
 		t: t, bin: bin, basePort: basePort,
 		links:     map[int]map[int]*linkProxy{},
 		peersFlag: map[int]string{},
+		dataDirs:  map[int]string{},
+	}
+	if persistent {
+		root := t.TempDir()
+		for id := 1; id <= size; id++ {
+			c.dataDirs[id] = filepath.Join(root, fmt.Sprintf("node%d", id))
+		}
 	}
 	realAddr := func(id int) string { return fmt.Sprintf("127.0.0.1:%d", basePort+id) }
 
@@ -75,17 +103,21 @@ func startProxiedCluster(t *testing.T, bin string, size, basePort int) *proxiedC
 
 func (c *proxiedCluster) launch(id int, addr string, logs *syncBuffer) *testNode {
 	c.t.Helper()
-	cmd := startNodeProcess(c.t, c.bin, id, addr, c.peersFlag[id], logs)
+	var extra []string
+	if dir := c.dataDirs[id]; dir != "" {
+		extra = append(extra, "-data-dir="+dir)
+	}
+	cmd := startNodeProcess(c.t, c.bin, id, addr, c.peersFlag[id], logs, extra...)
 	return &testNode{id: id, addr: addr, cmd: cmd, logs: logs}
 }
 
 func (c *proxiedCluster) node(id int) *testNode { return c.nodes[id-1] }
 
 // restart starts a fresh process for a killed node, on a new port, and
-// points every other node's link to it at the new address. The node comes
-// back with an EMPTY log and term 0: persistence to disk is not
-// implemented yet, so a restart is effectively a brand-new node rejoining
-// the cluster, and it has to recover everything from the leader.
+// points every other node's link to it at the new address. In a persistent
+// cluster the node reloads its saved term, vote and log from its data
+// directory; in an in-memory one it comes back with an empty log and term
+// 0, like a brand-new node, and has to recover everything from the leader.
 func (c *proxiedCluster) restart(id int) *testNode {
 	c.t.Helper()
 	if !c.node(id).dead {

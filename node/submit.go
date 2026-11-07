@@ -40,6 +40,11 @@ func (n *Node) Submit(command []byte) (index int, term int, isLeader bool) {
 
 	n.persistent.Log = append(n.persistent.Log, LogEntry{Term: term, Index: index, Command: cmd})
 
+	// The leader counts itself as one of the replicas holding the entry
+	// when deciding whether it's committed (commit.go), so its own copy
+	// must be durable too.
+	n.persistLocked()
+
 	// In a multi-node cluster this never commits anything yet (no
 	// follower has the new entry). It matters for a single-node cluster,
 	// where the leader alone is already a majority and there are no

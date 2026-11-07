@@ -73,6 +73,13 @@ func (n *Node) HandleRequestVote(candidateTerm, candidateID, candidateLastLogInd
 
 	// All checks passed: grant the vote.
 	n.persistent.VotedFor = candidateID
+
+	// The vote must be on disk before the "yes" reply leaves. If this
+	// node granted a vote, crashed, and restarted without remembering
+	// it, it could vote for a second candidate in the same term, and two
+	// leaders could be elected in one term — exactly what Raft's
+	// one-vote-per-term rule exists to prevent.
+	n.persistLocked()
 	n.logger.Debug("granted vote", "term", n.persistent.CurrentTerm, "candidate", candidateID)
 
 	// Per the Raft paper's companion "Students' Guide to Raft": reset
